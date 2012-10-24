@@ -341,6 +341,9 @@ class WizardTestGenericViewInterface(TestCase):
         self.assertEqual(response.context_data['test_key'], 'test_value')
         self.assertEqual(response.context_data['another_key'], 'another_value')
 
+        # ticket #19025: `form` should be included in context
+        form = response.context_data['wizard']['form']
+        self.assertEqual(response.context_data['form'], form)            
 
 class WizardFormKwargsOverrideTests(TestCase):
     def setUp(self):
