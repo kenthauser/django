@@ -65,3 +65,18 @@ class SessionContactWizard(ContactWizard):
 class CookieContactWizard(ContactWizard):
     storage_name = 'django.contrib.formtools.wizard.storage.cookie.CookieStorage'
 
+class EmptyPage1(forms.Form):
+    on_page1 = forms.NullBooleanField()
+
+class EmptyPage2(forms.Form):
+    on_page2 = forms.NullBooleanField()
+
+class EmptyPage3(forms.Form):
+    on_page3 = forms.NullBooleanField()
+
+class RevalidationWizard(SessionContactWizard):
+    def done(self, form_list, **kwargs):
+        step = self.form_list.keys()[1]
+        form = form_list[1]
+        raise self.RevalidationError(step, form, **kwargs)
+
