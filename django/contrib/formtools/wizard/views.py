@@ -307,6 +307,16 @@ class WizardView(TemplateView):
         self.storage.current_step = next_step
         return self.render(new_form, **kwargs)
 
+    class RevalidationError(Exception):
+        def __init__(self, step, form, **kwargs):
+            self.step = step
+            self.form = form
+            self.kwargs = kwargs
+
+        def __repr__(self):
+            return 'RevalidationError(%s)' % self.step
+        __str__ = __repr__
+
     def render_done(self, form, **kwargs):
         """
         This method gets called when all forms passed. The method should also
@@ -327,7 +337,11 @@ class WizardView(TemplateView):
         # render the done view and reset the wizard before returning the
         # response. This is needed to prevent from rendering done with the
         # same data twice.
-        done_response = self.done(final_form_list, **kwargs)
+        try:
+            done_response = self.done(final_form_list, **kwargs)
+        except self.RevalidationError as e:
+            return self.render_revalidation_failure(e.step, e.form, **e.kwargs)
+
         self.storage.reset()
         return done_response
 
