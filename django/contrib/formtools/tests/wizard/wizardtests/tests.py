@@ -405,21 +405,7 @@ class WizardRevalidationTests(TestCase):
         },
     )
 
-    def test_form_stepback(self):
-        response = self.client.get(self.wizard_url)
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.context['wizard']['steps'].current, 'form1')
-
-        response = self.client.post(self.wizard_url, self.wizard_step_data[0])
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.context['wizard']['steps'].current, 'form2')
-
-        response = self.client.post(self.wizard_url, {
-            'wizard_goto_step': response.context['wizard']['steps'].prev})
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.context['wizard']['steps'].current, 'form1')
-
-    def test_form_finish(self):
+    def test_form_revalidate(self):
         response = self.client.get(self.wizard_url)
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.context['wizard']['steps'].current, 'form1')
@@ -435,15 +421,5 @@ class WizardRevalidationTests(TestCase):
 
         response = self.client.post(self.wizard_url, self.wizard_step_data[2])
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.context['wizard']['steps'].current, 'form4')
-
-        response = self.client.post(self.wizard_url, self.wizard_step_data[3])
-        self.assertEqual(response.status_code, 200)
-
-        self.assertEqual(all_data, [
-            {'name': 'Pony', 'thirsty': True, 'user': self.testuser},
-            {'address1': '123 Main St', 'address2': 'Djangoland'},
-            {'random_crap': 'blah blah'},
-            [{'random_crap': 'blah blah'},
-             {'random_crap': 'blah blah'}]])
+        self.assertEqual(response.context['wizard']['steps'].current, 'form2')
 

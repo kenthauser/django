@@ -314,7 +314,7 @@ class WizardView(TemplateView):
             self.kwargs = kwargs
 
         def __repr__(self):
-            return 'RevalidationError(%s)' % self.step
+            return '%s(%s)' % (self.__class__, self.step)
         __str__ = __repr__
 
     def render_done(self, form, **kwargs):
