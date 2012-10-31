@@ -129,10 +129,14 @@ class QueryDictTests(unittest.TestCase):
             self.assertTrue(q.has_key('foo'))
         self.assertTrue('foo' in q)
 
-        self.assertEqual(list(six.iteritems(q)),  [('foo', 'another'), ('name', 'john')])
-        self.assertEqual(list(six.iterlists(q)), [('foo', ['bar', 'baz', 'another']), ('name', ['john'])])
-        self.assertEqual(list(six.iterkeys(q)), ['foo', 'name'])
-        self.assertEqual(list(six.itervalues(q)), ['another', 'john'])
+        self.assertEqual(sorted(list(six.iteritems(q))),
+                         [('foo', 'another'), ('name', 'john')])
+        self.assertEqual(sorted(list(six.iterlists(q))),
+                         [('foo', ['bar', 'baz', 'another']), ('name', ['john'])])
+        self.assertEqual(sorted(list(six.iterkeys(q))),
+                         ['foo', 'name'])
+        self.assertEqual(sorted(list(six.itervalues(q))),
+                         ['another', 'john'])
         self.assertEqual(len(q), 2)
 
         q.update({'foo': 'hello'})
@@ -145,7 +149,7 @@ class QueryDictTests(unittest.TestCase):
         self.assertEqual(q.setdefault('foo', 'bar'), 'bar')
         self.assertEqual(q['foo'], 'bar')
         self.assertEqual(q.getlist('foo'), ['bar'])
-        self.assertEqual(q.urlencode(), 'foo=bar&name=john')
+        self.assertIn(q.urlencode(), ['foo=bar&name=john', 'name=john&foo=bar'])
 
         q.clear()
         self.assertEqual(len(q), 0)
@@ -262,14 +266,18 @@ class HttpResponseTests(unittest.TestCase):
         # The response also converts unicode or bytes keys to strings, but requires
         # them to contain ASCII
         r = HttpResponse()
+        del r['Content-Type']
         r['foo'] = 'bar'
         l = list(r.items())
+        self.assertEqual(len(l), 1)
         self.assertEqual(l[0], ('foo', 'bar'))
         self.assertIsInstance(l[0][0], str)
 
         r = HttpResponse()
+        del r['Content-Type']
         r[b'foo'] = 'bar'
         l = list(r.items())
+        self.assertEqual(len(l), 1)
         self.assertEqual(l[0], ('foo', 'bar'))
         self.assertIsInstance(l[0][0], str)
 
@@ -330,11 +338,12 @@ class HttpResponseTests(unittest.TestCase):
         self.assertEqual(r.content, b'123\xde\x9e')
 
         #with Content-Encoding header
-        r = HttpResponse([1,1,2,4,8])
+        r = HttpResponse()
         r['Content-Encoding'] = 'winning'
-        self.assertEqual(r.content, b'11248')
-        r.content = ['\u079e',]
-        self.assertRaises(UnicodeEncodeError,
+        r.content = [b'abc', b'def']
+        self.assertEqual(r.content, b'abcdef')
+        r.content = ['\u079e']
+        self.assertRaises(TypeError if six.PY3 else UnicodeEncodeError,
                           getattr, r, 'content')
 
         # .content can safely be accessed multiple times.
@@ -568,7 +577,7 @@ class CookieTests(unittest.TestCase):
         """
         Test that a repeated non-standard name doesn't affect all cookies. Ticket #15852
         """
-        self.assertTrue('good_cookie' in parse_cookie('a,=b; a,=c; good_cookie=yes').keys())
+        self.assertTrue('good_cookie' in parse_cookie('a:=b; a:=c; good_cookie=yes').keys())
 
     def test_httponly_after_load(self):
         """
