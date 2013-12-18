@@ -2,20 +2,21 @@ from __future__ import unicode_literals
 
 from django.conf import settings
 from django.contrib.sites.models import Site, RequestSite, get_current_site
-from django.core.exceptions import ObjectDoesNotExist
+from django.core.exceptions import ObjectDoesNotExist, ValidationError
 from django.http import HttpRequest
 from django.test import TestCase
+from django.test.utils import override_settings
 
 
 class SitesFrameworkTests(TestCase):
 
     def setUp(self):
         Site(id=settings.SITE_ID, domain="example.com", name="example.com").save()
-        self.old_Site_meta_installed = Site._meta.installed
-        Site._meta.installed = True
+        self._old_installed = Site._meta.app_config.installed
+        Site._meta.app_config.installed = True
 
     def tearDown(self):
-        Site._meta.installed = self.old_Site_meta_installed
+        Site._meta.app_config.installed = self._old_installed
 
     def test_save_another(self):
         # Regression for #17415
@@ -41,6 +42,14 @@ class SitesFrameworkTests(TestCase):
         site = Site.objects.get_current()
         self.assertEqual("Example site", site.name)
 
+    def test_delete_all_sites_clears_cache(self):
+        # When all site objects are deleted the cache should also
+        # be cleared and get_current() should raise a DoesNotExist.
+        self.assertIsInstance(Site.objects.get_current(), Site)
+        Site.objects.all().delete()
+        self.assertRaises(Site.DoesNotExist, Site.objects.get_current)
+
+    @override_settings(ALLOWED_HOSTS=['example.com'])
     def test_get_current_site(self):
         # Test that the correct Site object is returned
         request = HttpRequest()
@@ -58,7 +67,17 @@ class SitesFrameworkTests(TestCase):
         self.assertRaises(ObjectDoesNotExist, get_current_site, request)
 
         # A RequestSite is returned if the sites framework is not installed
-        Site._meta.installed = False
+        Site._meta.app_config.installed = False
         site = get_current_site(request)
         self.assertTrue(isinstance(site, RequestSite))
         self.assertEqual(site.name, "example.com")
+
+    def test_domain_name_with_whitespaces(self):
+        # Regression for #17320
+        # Domain names are not allowed contain whitespace characters
+        site = Site(name="test name", domain="test test")
+        self.assertRaises(ValidationError, site.full_clean)
+        site.domain = "test\ttest"
+        self.assertRaises(ValidationError, site.full_clean)
+        site.domain = "test\ntest"
+        self.assertRaises(ValidationError, site.full_clean)

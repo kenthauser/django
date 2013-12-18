@@ -16,9 +16,9 @@ or CheetahTemplate_, you should feel right at home with Django's templates.
 .. admonition:: Philosophy
 
     If you have a background in programming, or if you're used to languages
-    like PHP which mix programming code directly into HTML, you'll want to
-    bear in mind that the Django template system is not simply Python embedded
-    into HTML. This is by design: the template system is meant to express
+    which mix programming code directly into HTML, you'll want to bear in
+    mind that the Django template system is not simply Python embedded into
+    HTML. This is by design: the template system is meant to express
     presentation, not program logic.
 
     The Django template system provides tags which function similarly to some
@@ -30,7 +30,7 @@ or CheetahTemplate_, you should feel right at home with Django's templates.
     </howto/custom-template-tags>` to the template language as needed).
 
 .. _`The Django template language: For Python programmers`: ../templates_python/
-.. _Smarty: http://smarty.php.net/
+.. _Smarty: http://www.smarty.net/
 .. _CheetahTemplate: http://www.cheetahtemplate.org/
 
 Templates
@@ -45,7 +45,9 @@ A template contains **variables**, which get replaced with values when the
 template is evaluated, and **tags**, which control the logic of the template.
 
 Below is a minimal template that illustrates a few basics. Each element will be
-explained later in this document.::
+explained later in this document.
+
+.. code-block:: html+django
 
     {% extends "base_generic.html" %}
 
@@ -250,6 +252,8 @@ You can also create your own custom template tags; see
     tags and filters available for a given site. See
     :doc:`/ref/contrib/admin/admindocs`.
 
+.. _template-comments:
+
 Comments
 ========
 
@@ -428,7 +432,7 @@ template fragment::
     Hello, {{ name }}.
 
 At first, this seems like a harmless way to display a user's name, but consider
-what would happen if the user entered his name as this::
+what would happen if the user entered their name as this::
 
     <script>alert('hello')</script>
 

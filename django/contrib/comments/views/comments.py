@@ -1,10 +1,9 @@
-from __future__ import absolute_import
-
 from django import http
 from django.conf import settings
 from django.contrib import comments
 from django.contrib.comments import signals
 from django.contrib.comments.views.utils import next_redirect, confirmation_view
+from django.core.apps import app_cache
 from django.core.exceptions import ObjectDoesNotExist, ValidationError
 from django.db import models
 from django.shortcuts import render_to_response
@@ -44,16 +43,13 @@ def post_comment(request, next=None, using=None):
         if not data.get('email', ''):
             data["email"] = request.user.email
 
-    # Check to see if the POST data overrides the view's next argument.
-    next = data.get("next", next)
-
     # Look up the object we're trying to comment about
     ctype = data.get("content_type")
     object_pk = data.get("object_pk")
     if ctype is None or object_pk is None:
         return CommentPostBadRequest("Missing content_type or object_pk field.")
     try:
-        model = models.get_model(*ctype.split(".", 1))
+        model = app_cache.get_model(*ctype.split(".", 1))
         target = model._default_manager.using(using).get(pk=object_pk)
     except TypeError:
         return CommentPostBadRequest(
@@ -89,10 +85,10 @@ def post_comment(request, next=None, using=None):
             # These first two exist for purely historical reasons.
             # Django v1.0 and v1.1 allowed the underscore format for
             # preview templates, so we have to preserve that format.
-            "comments/%s_%s_preview.html" % (model._meta.app_label, model._meta.module_name),
+            "comments/%s_%s_preview.html" % (model._meta.app_label, model._meta.model_name),
             "comments/%s_preview.html" % model._meta.app_label,
             # Now the usual directory based template hierarchy.
-            "comments/%s/%s/preview.html" % (model._meta.app_label, model._meta.module_name),
+            "comments/%s/%s/preview.html" % (model._meta.app_label, model._meta.model_name),
             "comments/%s/preview.html" % model._meta.app_label,
             "comments/preview.html",
         ]
@@ -100,7 +96,7 @@ def post_comment(request, next=None, using=None):
             template_list, {
                 "comment": form.data.get("comment", ""),
                 "form": form,
-                "next": next,
+                "next": data.get("next", next),
             },
             RequestContext(request, {})
         )
@@ -131,7 +127,8 @@ def post_comment(request, next=None, using=None):
         request=request
     )
 
-    return next_redirect(data, next, comment_done, c=comment._get_pk_val())
+    return next_redirect(request, fallback=next or 'comments-comment-done',
+        c=comment._get_pk_val())
 
 comment_done = confirmation_view(
     template="comments/posted.html",

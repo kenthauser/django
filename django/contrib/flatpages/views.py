@@ -1,7 +1,6 @@
 from django.conf import settings
 from django.contrib.flatpages.models import FlatPage
 from django.contrib.sites.models import get_current_site
-from django.core.xheaders import populate_xheaders
 from django.http import Http404, HttpResponse, HttpResponsePermanentRedirect
 from django.shortcuts import get_object_or_404
 from django.template import loader, RequestContext
@@ -18,6 +17,8 @@ DEFAULT_TEMPLATE = 'flatpages/default.html'
 # or a redirect is required for authentication, the 404 needs to be returned
 # without any CSRF checks. Therefore, we only
 # CSRF protect the internal implementation.
+
+
 def flatpage(request, url):
     """
     Public interface to the flat page view.
@@ -45,6 +46,7 @@ def flatpage(request, url):
             raise
     return render_flatpage(request, f)
 
+
 @csrf_protect
 def render_flatpage(request, f):
     """
@@ -70,5 +72,4 @@ def render_flatpage(request, f):
         'flatpage': f,
     })
     response = HttpResponse(t.render(c))
-    populate_xheaders(request, response, FlatPage, f.id)
     return response

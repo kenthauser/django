@@ -1,5 +1,3 @@
-from __future__ import absolute_import
-
 from django import template
 from django.conf import settings
 from django.contrib import comments
@@ -8,7 +6,6 @@ from django.contrib.comments import signals
 from django.contrib.comments.views.utils import next_redirect, confirmation_view
 from django.shortcuts import get_object_or_404, render_to_response
 from django.views.decorators.csrf import csrf_protect
-
 
 
 @csrf_protect
@@ -27,7 +24,8 @@ def flag(request, comment_id, next=None):
     # Flag on POST
     if request.method == 'POST':
         perform_flag(request, comment)
-        return next_redirect(request.POST.copy(), next, flag_done, c=comment.pk)
+        return next_redirect(request, fallback=next or 'comments-flag-done',
+            c=comment.pk)
 
     # Render a form on GET
     else:
@@ -54,7 +52,8 @@ def delete(request, comment_id, next=None):
     if request.method == 'POST':
         # Flag the comment as deleted instead of actually deleting it.
         perform_delete(request, comment)
-        return next_redirect(request.POST.copy(), next, delete_done, c=comment.pk)
+        return next_redirect(request, fallback=next or 'comments-delete-done',
+            c=comment.pk)
 
     # Render a form on GET
     else:
@@ -81,7 +80,8 @@ def approve(request, comment_id, next=None):
     if request.method == 'POST':
         # Flag the comment as approved.
         perform_approve(request, comment)
-        return next_redirect(request.POST.copy(), next, approve_done, c=comment.pk)
+        return next_redirect(request, fallback=next or 'comments-approve-done',
+            c=comment.pk)
 
     # Render a form on GET
     else:
@@ -99,40 +99,40 @@ def perform_flag(request, comment):
     Actually perform the flagging of a comment from a request.
     """
     flag, created = comments.models.CommentFlag.objects.get_or_create(
-        comment = comment,
-        user    = request.user,
-        flag    = comments.models.CommentFlag.SUGGEST_REMOVAL
+        comment=comment,
+        user=request.user,
+        flag=comments.models.CommentFlag.SUGGEST_REMOVAL
     )
     signals.comment_was_flagged.send(
-        sender  = comment.__class__,
-        comment = comment,
-        flag    = flag,
-        created = created,
-        request = request,
+        sender=comment.__class__,
+        comment=comment,
+        flag=flag,
+        created=created,
+        request=request,
     )
 
 def perform_delete(request, comment):
     flag, created = comments.models.CommentFlag.objects.get_or_create(
-        comment = comment,
-        user    = request.user,
-        flag    = comments.models.CommentFlag.MODERATOR_DELETION
+        comment=comment,
+        user=request.user,
+        flag=comments.models.CommentFlag.MODERATOR_DELETION
     )
     comment.is_removed = True
     comment.save()
     signals.comment_was_flagged.send(
-        sender  = comment.__class__,
-        comment = comment,
-        flag    = flag,
-        created = created,
-        request = request,
+        sender=comment.__class__,
+        comment=comment,
+        flag=flag,
+        created=created,
+        request=request,
     )
 
 
 def perform_approve(request, comment):
     flag, created = comments.models.CommentFlag.objects.get_or_create(
-        comment = comment,
-        user    = request.user,
-        flag    = comments.models.CommentFlag.MODERATOR_APPROVAL,
+        comment=comment,
+        user=request.user,
+        flag=comments.models.CommentFlag.MODERATOR_APPROVAL,
     )
 
     comment.is_removed = False
@@ -140,24 +140,24 @@ def perform_approve(request, comment):
     comment.save()
 
     signals.comment_was_flagged.send(
-        sender  = comment.__class__,
-        comment = comment,
-        flag    = flag,
-        created = created,
-        request = request,
+        sender=comment.__class__,
+        comment=comment,
+        flag=flag,
+        created=created,
+        request=request,
     )
 
 # Confirmation views.
 
 flag_done = confirmation_view(
-    template = "comments/flagged.html",
-    doc = 'Displays a "comment was flagged" success page.'
+    template="comments/flagged.html",
+    doc='Displays a "comment was flagged" success page.'
 )
 delete_done = confirmation_view(
-    template = "comments/deleted.html",
-    doc = 'Displays a "comment was deleted" success page.'
+    template="comments/deleted.html",
+    doc='Displays a "comment was deleted" success page.'
 )
 approve_done = confirmation_view(
-    template = "comments/approved.html",
-    doc = 'Displays a "comment was approved" success page.'
+    template="comments/approved.html",
+    doc='Displays a "comment was approved" success page.'
 )

@@ -5,13 +5,14 @@ from django.conf import settings
 from django.db import models
 from django.core.exceptions import ImproperlyConfigured
 from django.http import Http404
-from django.utils.encoding import force_text
+from django.utils.encoding import force_str, force_text
 from django.utils.functional import cached_property
 from django.utils.translation import ugettext as _
 from django.utils import timezone
 from django.views.generic.base import View
 from django.views.generic.detail import BaseDetailView, SingleObjectTemplateResponseMixin
 from django.views.generic.list import MultipleObjectMixin, MultipleObjectTemplateResponseMixin
+
 
 class YearMixin(object):
     """
@@ -366,7 +367,7 @@ class BaseDateListView(MultipleObjectMixin, DateMixin, View):
             is_empty = len(qs) == 0 if paginate_by is None else not qs.exists()
             if is_empty:
                 raise Http404(_("No %(verbose_name_plural)s available") % {
-                        'verbose_name_plural': force_text(qs.model._meta.verbose_name_plural)
+                    'verbose_name_plural': force_text(qs.model._meta.verbose_name_plural)
                 })
 
         return qs
@@ -379,15 +380,18 @@ class BaseDateListView(MultipleObjectMixin, DateMixin, View):
 
     def get_date_list(self, queryset, date_type=None, ordering='ASC'):
         """
-        Get a date list by calling `queryset.dates()`, checking along the way
-        for empty lists that aren't allowed.
+        Get a date list by calling `queryset.dates/datetimes()`, checking
+        along the way for empty lists that aren't allowed.
         """
         date_field = self.get_date_field()
         allow_empty = self.get_allow_empty()
         if date_type is None:
             date_type = self.get_date_list_period()
 
-        date_list = queryset.dates(date_field, date_type, ordering)
+        if self.uses_datetime_field:
+            date_list = queryset.datetimes(date_field, date_type, ordering)
+        else:
+            date_list = queryset.dates(date_field, date_type, ordering)
         if date_list is not None and not date_list and not allow_empty:
             name = force_text(queryset.model._meta.verbose_name_plural)
             raise Http404(_("No %(verbose_name_plural)s available") %
@@ -673,7 +677,7 @@ def _date_from_string(year, year_format, month='', month_format='', day='', day_
     format = delim.join((year_format, month_format, day_format))
     datestr = delim.join((year, month, day))
     try:
-        return datetime.datetime.strptime(datestr, format).date()
+        return datetime.datetime.strptime(force_str(datestr), format).date()
     except ValueError:
         raise Http404(_("Invalid date string '%(datestr)s' given format '%(format)s'") % {
             'datestr': datestr,

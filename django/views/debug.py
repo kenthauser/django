@@ -7,27 +7,29 @@ import sys
 import types
 
 from django.conf import settings
-from django.core.exceptions import ImproperlyConfigured
 from django.http import (HttpResponse, HttpResponseServerError,
     HttpResponseNotFound, HttpRequest, build_request_repr)
 from django.template import Template, Context, TemplateDoesNotExist
 from django.template.defaultfilters import force_escape, pprint
+from django.utils.datastructures import MultiValueDict
 from django.utils.html import escape
-from django.utils.importlib import import_module
 from django.utils.encoding import force_bytes, smart_text
+from django.utils.module_loading import import_by_path
 from django.utils import six
 
 HIDDEN_SETTINGS = re.compile('API|TOKEN|KEY|SECRET|PASS|PROFANITIES_LIST|SIGNATURE')
 
 CLEANSED_SUBSTITUTE = '********************'
 
+
 def linebreak_iter(template_source):
     yield 0
     p = template_source.find('\n')
     while p >= 0:
-        yield p+1
-        p = template_source.find('\n', p+1)
+        yield p + 1
+        p = template_source.find('\n', p + 1)
     yield len(template_source) + 1
+
 
 def cleanse_setting(key, value):
     """Cleanse an individual setting key/value of sensitive content.
@@ -40,13 +42,18 @@ def cleanse_setting(key, value):
             cleansed = CLEANSED_SUBSTITUTE
         else:
             if isinstance(value, dict):
-                cleansed = dict((k, cleanse_setting(k, v)) for k,v in value.items())
+                cleansed = dict((k, cleanse_setting(k, v)) for k, v in value.items())
             else:
                 cleansed = value
     except TypeError:
         # If the key isn't regex-able, just return as-is.
         cleansed = value
+
+    if callable(cleansed):
+        cleansed.do_not_call_in_templates = True
+
     return cleansed
+
 
 def get_safe_settings():
     "Returns a dictionary of the settings module, with sensitive settings blurred out."
@@ -55,6 +62,7 @@ def get_safe_settings():
         if k.isupper():
             settings_dict[k] = cleanse_setting(k, getattr(settings, k))
     return settings_dict
+
 
 def technical_500_response(request, exc_type, exc_value, tb):
     """
@@ -72,25 +80,18 @@ def technical_500_response(request, exc_type, exc_value, tb):
 # Cache for the default exception reporter filter instance.
 default_exception_reporter_filter = None
 
+
 def get_exception_reporter_filter(request):
     global default_exception_reporter_filter
     if default_exception_reporter_filter is None:
         # Load the default filter for the first time and cache it.
-        modpath = settings.DEFAULT_EXCEPTION_REPORTER_FILTER
-        modname, classname = modpath.rsplit('.', 1)
-        try:
-            mod = import_module(modname)
-        except ImportError as e:
-            raise ImproperlyConfigured(
-            'Error importing default exception reporter filter %s: "%s"' % (modpath, e))
-        try:
-            default_exception_reporter_filter = getattr(mod, classname)()
-        except AttributeError:
-            raise ImproperlyConfigured('Default exception reporter filter module "%s" does not define a "%s" class' % (modname, classname))
+        default_exception_reporter_filter = import_by_path(
+            settings.DEFAULT_EXCEPTION_REPORTER_FILTER)()
     if request:
         return getattr(request, 'exception_reporter_filter', default_exception_reporter_filter)
     else:
         return default_exception_reporter_filter
+
 
 class ExceptionReporterFilter(object):
     """
@@ -113,6 +114,7 @@ class ExceptionReporterFilter(object):
     def get_traceback_frame_variables(self, request, tb_frame):
         return list(six.iteritems(tb_frame.f_locals))
 
+
 class SafeExceptionReporterFilter(ExceptionReporterFilter):
     """
     Use annotations made by the sensitive_post_parameters and
@@ -127,6 +129,20 @@ class SafeExceptionReporterFilter(ExceptionReporterFilter):
         deactivate the filter on a per request basis.
         """
         return settings.DEBUG is False
+
+    def get_cleansed_multivaluedict(self, request, multivaluedict):
+        """
+        Replaces the keys in a MultiValueDict marked as sensitive with stars.
+        This mitigates leaking sensitive POST parameters if something like
+        request.POST['nonexistent_key'] throws an exception (#21098).
+        """
+        sensitive_post_parameters = getattr(request, 'sensitive_post_parameters', [])
+        if self.is_active(request) and sensitive_post_parameters:
+            multivaluedict = multivaluedict.copy()
+            for param in sensitive_post_parameters:
+                if param in multivaluedict:
+                    multivaluedict[param] = CLEANSED_SUBSTITUTE
+        return multivaluedict
 
     def get_post_parameters(self, request):
         """
@@ -153,6 +169,15 @@ class SafeExceptionReporterFilter(ExceptionReporterFilter):
             else:
                 return request.POST
 
+    def cleanse_special_types(self, request, value):
+        if isinstance(value, HttpRequest):
+            # Cleanse the request's POST parameters.
+            value = self.get_request_repr(value)
+        elif isinstance(value, MultiValueDict):
+            # Cleanse MultiValueDicts (request.POST is the one we usually care about)
+            value = self.get_cleansed_multivaluedict(request, value)
+        return value
+
     def get_traceback_frame_variables(self, request, tb_frame):
         """
         Replaces the values of variables marked as sensitive with
@@ -164,7 +189,7 @@ class SafeExceptionReporterFilter(ExceptionReporterFilter):
         sensitive_variables = None
         while current_frame is not None:
             if (current_frame.f_code.co_name == 'sensitive_variables_wrapper'
-                and 'sensitive_variables_wrapper' in current_frame.f_locals):
+                    and 'sensitive_variables_wrapper' in current_frame.f_locals):
                 # The sensitive_variables decorator was used, so we take note
                 # of the sensitive variables' names.
                 wrapper = current_frame.f_locals['sensitive_variables_wrapper']
@@ -172,31 +197,37 @@ class SafeExceptionReporterFilter(ExceptionReporterFilter):
                 break
             current_frame = current_frame.f_back
 
-        cleansed = []
+        cleansed = {}
         if self.is_active(request) and sensitive_variables:
             if sensitive_variables == '__ALL__':
                 # Cleanse all variables
                 for name, value in tb_frame.f_locals.items():
-                    cleansed.append((name, CLEANSED_SUBSTITUTE))
-                return cleansed
+                    cleansed[name] = CLEANSED_SUBSTITUTE
             else:
                 # Cleanse specified variables
                 for name, value in tb_frame.f_locals.items():
                     if name in sensitive_variables:
                         value = CLEANSED_SUBSTITUTE
-                    elif isinstance(value, HttpRequest):
-                        # Cleanse the request's POST parameters.
-                        value = self.get_request_repr(value)
-                    cleansed.append((name, value))
-                return cleansed
+                    else:
+                        value = self.cleanse_special_types(request, value)
+                    cleansed[name] = value
         else:
-            # Potentially cleanse only the request if it's one of the frame variables.
+            # Potentially cleanse the request and any MultiValueDicts if they
+            # are one of the frame variables.
             for name, value in tb_frame.f_locals.items():
-                if isinstance(value, HttpRequest):
-                    # Cleanse the request's POST parameters.
-                    value = self.get_request_repr(value)
-                cleansed.append((name, value))
-            return cleansed
+                cleansed[name] = self.cleanse_special_types(request, value)
+
+        if (tb_frame.f_code.co_name == 'sensitive_variables_wrapper'
+                and 'sensitive_variables_wrapper' in tb_frame.f_locals):
+            # For good measure, obfuscate the decorated function's arguments in
+            # the sensitive_variables decorator's frame, in case the variables
+            # associated with those arguments were meant to be obfuscated from
+            # the decorated function's frame.
+            cleansed['func_args'] = CLEANSED_SUBSTITUTE
+            cleansed['func_kwargs'] = CLEANSED_SUBSTITUTE
+
+        return cleansed.items()
+
 
 class ExceptionReporter(object):
     """
@@ -219,20 +250,35 @@ class ExceptionReporter(object):
             self.exc_value = Exception('Deprecated String Exception: %r' % self.exc_type)
             self.exc_type = type(self.exc_value)
 
+    def format_path_status(self, path):
+        if not os.path.exists(path):
+            return "File does not exist"
+        if not os.path.isfile(path):
+            return "Not a file"
+        if not os.access(path, os.R_OK):
+            return "File is not readable"
+        return "File exists"
+
     def get_traceback_data(self):
-        "Return a Context instance containing traceback information."
+        """Return a dictionary containing traceback information."""
 
         if self.exc_type and issubclass(self.exc_type, TemplateDoesNotExist):
             from django.template.loader import template_source_loaders
             self.template_does_not_exist = True
             self.loader_debug_info = []
+            # If the template_source_loaders haven't been populated yet, you need
+            # to provide an empty list for this for loop to not fail.
+            if template_source_loaders is None:
+                template_source_loaders = []
             for loader in template_source_loaders:
                 try:
                     source_list_func = loader.get_template_sources
                     # NOTE: This assumes exc_value is the name of the template that
                     # the loader attempted to load.
-                    template_list = [{'name': t, 'exists': os.path.exists(t)} \
-                        for t in source_list_func(str(self.exc_value))]
+                    template_list = [{
+                        'name': t,
+                        'status': self.format_path_status(t),
+                    } for t in source_list_func(str(self.exc_value))]
                 except AttributeError:
                     template_list = []
                 loader_name = loader.__module__ + '.' + loader.__class__.__name__
@@ -241,7 +287,7 @@ class ExceptionReporter(object):
                     'templates': template_list,
                 })
         if (settings.TEMPLATE_DEBUG and
-            hasattr(self.exc_value, 'django_template_source')):
+                hasattr(self.exc_value, 'django_template_source')):
             self.get_template_exception_info()
 
         frames = self.get_traceback_frames()
@@ -256,7 +302,7 @@ class ExceptionReporter(object):
             end = getattr(self.exc_value, 'end', None)
             if start is not None and end is not None:
                 unicode_str = self.exc_value.args[1]
-                unicode_hint = smart_text(unicode_str[max(start-5, 0):min(end+5, len(unicode_str))], 'ascii', errors='replace')
+                unicode_hint = smart_text(unicode_str[max(start - 5, 0):min(end + 5, len(unicode_str))], 'ascii', errors='replace')
         from django import get_version
         c = {
             'is_email': self.is_email,
@@ -269,7 +315,7 @@ class ExceptionReporter(object):
             'sys_version_info': '%d.%d.%d' % sys.version_info[0:3],
             'server_time': datetime.datetime.now(),
             'django_version_info': get_version(),
-            'sys_path' : sys.path,
+            'sys_path': sys.path,
             'template_info': self.template_info,
             'template_does_not_exist': self.template_does_not_exist,
             'loader_debug_info': self.loader_debug_info,
@@ -286,13 +332,13 @@ class ExceptionReporter(object):
     def get_traceback_html(self):
         "Return HTML version of debug 500 HTTP error page."
         t = Template(TECHNICAL_500_TEMPLATE, name='Technical 500 template')
-        c = Context(self.get_traceback_data())
+        c = Context(self.get_traceback_data(), use_l10n=False)
         return t.render(c)
 
     def get_traceback_text(self):
         "Return plain text version of debug 500 HTTP error page."
         t = Template(TECHNICAL_500_TEXT_TEMPLATE, name='Technical 500 template')
-        c = Context(self.get_traceback_data(), autoescape=False)
+        c = Context(self.get_traceback_data(), autoescape=False, use_l10n=False)
         return t.render(c)
 
     def get_template_exception_info(self):
@@ -309,7 +355,7 @@ class ExceptionReporter(object):
                 before = escape(template_source[upto:start])
                 during = escape(template_source[start:end])
                 after = escape(template_source[end:next])
-            source_lines.append( (num, escape(template_source[upto:next])) )
+            source_lines.append((num, escape(template_source[upto:next])))
             upto = next
         total = len(source_lines)
 
@@ -342,13 +388,16 @@ class ExceptionReporter(object):
         """
         source = None
         if loader is not None and hasattr(loader, "get_source"):
-            source = loader.get_source(module_name)
+            try:
+                source = loader.get_source(module_name)
+            except ImportError:
+                pass
             if source is not None:
                 source = source.splitlines()
         if source is None:
             try:
                 with open(filename, 'rb') as fp:
-                    source = fp.readlines()
+                    source = fp.read().splitlines()
             except (OSError, IOError):
                 pass
         if source is None:
@@ -371,9 +420,9 @@ class ExceptionReporter(object):
         lower_bound = max(0, lineno - context_lines)
         upper_bound = lineno + context_lines
 
-        pre_context = [line.strip('\n') for line in source[lower_bound:lineno]]
-        context_line = source[lineno].strip('\n')
-        post_context = [line.strip('\n') for line in source[lineno+1:upper_bound]]
+        pre_context = source[lower_bound:lineno]
+        context_line = source[lineno]
+        post_context = source[lineno + 1:upper_bound]
 
         return lower_bound, pre_context, context_line, post_context
 
@@ -395,7 +444,7 @@ class ExceptionReporter(object):
             if pre_context_lineno is not None:
                 frames.append({
                     'tb': tb,
-                    'type': module_name.startswith('django.') and 'django' or 'user',
+                    'type': 'django' if module_name.startswith('django.') else 'user',
                     'filename': filename,
                     'function': function,
                     'lineno': lineno + 1,
@@ -416,7 +465,7 @@ class ExceptionReporter(object):
         """
         import traceback
         frames = self.get_traceback_frames()
-        tb = [ (f['filename'], f['lineno'], f['function'], f['context_line']) for f in frames ]
+        tb = [(f['filename'], f['lineno'], f['function'], f['context_line']) for f in frames]
         list = ['Traceback (most recent call last):\n']
         list += traceback.format_list(tb)
         list += traceback.format_exception_only(self.exc_type, self.exc_value)
@@ -430,9 +479,12 @@ def technical_404_response(request, exception):
     except (IndexError, TypeError, KeyError):
         tried = []
     else:
-        if not tried:
-            # tried exists but is an empty list. The URLconf must've been empty.
-            return empty_urlconf(request)
+        if (not tried                           # empty URLconf
+            or (request.path == '/'
+                and len(tried) == 1             # default URLconf
+                and len(tried[0]) == 1
+                and getattr(tried[0][0], 'app_name', '') == getattr(tried[0][0], 'namespace', '') == 'admin')):
+            return default_urlconf(request)
 
     urlconf = getattr(request, 'urlconf', settings.ROOT_URLCONF)
     if isinstance(urlconf, types.ModuleType):
@@ -442,7 +494,7 @@ def technical_404_response(request, exception):
     c = Context({
         'urlconf': urlconf,
         'root_urlconf': settings.ROOT_URLCONF,
-        'request_path': request.path_info[1:], # Trim leading slash
+        'request_path': request.path_info[1:],  # Trim leading slash
         'urlpatterns': tried,
         'reason': force_bytes(exception, errors='replace'),
         'request': request,
@@ -450,12 +502,11 @@ def technical_404_response(request, exception):
     })
     return HttpResponseNotFound(t.render(c), content_type='text/html')
 
-def empty_urlconf(request):
+
+def default_urlconf(request):
     "Create an empty URLconf 404 error response."
-    t = Template(EMPTY_URLCONF_TEMPLATE, name='Empty URLConf template')
-    c = Context({
-        'project_name': settings.SETTINGS_MODULE.split('.')[0]
-    })
+    t = Template(DEFAULT_URLCONF_TEMPLATE, name='Default URLconf template')
+    c = Context({})
     return HttpResponse(t.render(c), content_type='text/html')
 
 #
@@ -557,7 +608,7 @@ TECHNICAL_500_TEMPLATE = """
       for (var i = 0; i < arguments.length; i++) {
         var e = document.getElementById(arguments[i]);
         if (e) {
-          e.style.display = e.style.display == 'none' ? 'block' : 'none';
+          e.style.display = e.style.display == 'none' ? 'block': 'none';
         }
       }
       return false;
@@ -573,7 +624,7 @@ TECHNICAL_500_TEMPLATE = """
     function switchPastebinFriendly(link) {
       s1 = "Switch to copy-and-paste view";
       s2 = "Switch back to interactive view";
-      link.innerHTML = link.innerHTML == s1 ? s2 : s1;
+      link.innerHTML = link.innerHTML == s1 ? s2: s1;
       toggle('browserTraceback', 'pastebinTraceback');
       return false;
     }
@@ -584,7 +635,7 @@ TECHNICAL_500_TEMPLATE = """
 <body>
 <div id="summary">
   <h1>{% if exception_type %}{{ exception_type }}{% else %}Report{% endif %}{% if request %} at {{ request.path_info|escape }}{% endif %}</h1>
-  <pre class="exception_value">{% if exception_value %}{{ exception_value|force_escape }}{% else %}No exception supplied{% endif %}</pre>
+  <pre class="exception_value">{% if exception_value %}{{ exception_value|force_escape }}{% else %}No exception message supplied{% endif %}</pre>
   <table class="meta">
 {% if request %}
     <tr>
@@ -650,7 +701,9 @@ TECHNICAL_500_TEMPLATE = """
         <ul>
         {% for loader in loader_debug_info %}
             <li>Using loader <code>{{ loader.loader }}</code>:
-                <ul>{% for t in loader.templates %}<li><code>{{ t.name }}</code> (File {% if t.exists %}exists{% else %}does not exist{% endif %})</li>{% endfor %}</ul>
+                <ul>
+                {% for t in loader.templates %}<li><code>{{ t.name }}</code> ({{ t.status }})</li>{% endfor %}
+                </ul>
             </li>
         {% endfor %}
         </ul>
@@ -753,7 +806,7 @@ Installed Middleware:
 {% if template_does_not_exist %}Template Loader Error:
 {% if loader_debug_info %}Django tried loading these templates, in this order:
 {% for loader in loader_debug_info %}Using loader {{ loader.loader }}:
-{% for t in loader.templates %}{{ t.name }} (File {% if t.exists %}exists{% else %}does not exist{% endif %})
+{% for t in loader.templates %}{{ t.name }} ({{ t.status }})
 {% endfor %}{% endfor %}
 {% else %}Django couldn't find any templates because your TEMPLATE_LOADERS setting is empty!
 {% endif %}
@@ -926,8 +979,8 @@ Exception Value: {{ exception_value|force_escape }}
 </html>
 """
 
-TECHNICAL_500_TEXT_TEMPLATE = """{% firstof exception_type 'Report' %}{% if request %} at {{ request.path_info }}{% endif %}
-{% firstof exception_value 'No exception supplied' %}
+TECHNICAL_500_TEXT_TEMPLATE = """{% load firstof from future %}{% firstof exception_type 'Report' %}{% if request %} at {{ request.path_info }}{% endif %}
+{% firstof exception_value 'No exception message supplied' %}
 {% if request %}
 Request Method: {{ request.META.REQUEST_METHOD }}
 Request URL: {{ request.build_absolute_uri }}{% endif %}
@@ -943,7 +996,7 @@ Installed Middleware:
 {% if template_does_not_exist %}Template loader Error:
 {% if loader_debug_info %}Django tried loading these templates, in this order:
 {% for loader in loader_debug_info %}Using loader {{ loader.loader }}:
-{% for t in loader.templates %}{{ t.name }} (File {% if t.exists %}exists{% else %}does not exist{% endif %})
+{% for t in loader.templates %}{{ t.name }} ({{ t.status }})
 {% endfor %}{% endfor %}
 {% else %}Django couldn't find any templates because your TEMPLATE_LOADERS setting is empty!
 {% endif %}
@@ -1059,7 +1112,7 @@ TECHNICAL_404_TEMPLATE = """
 </html>
 """
 
-EMPTY_URLCONF_TEMPLATE = """
+DEFAULT_URLCONF_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="en"><head>
   <meta http-equiv="content-type" content="text/html; charset=utf-8">
@@ -1079,7 +1132,6 @@ EMPTY_URLCONF_TEMPLATE = """
     tbody td, tbody th { vertical-align:top; padding:2px 3px; }
     thead th { padding:1px 6px 1px 3px; background:#fefefe; text-align:left; font-weight:normal; font-size:11px; border:1px solid #ddd; }
     tbody th { width:12em; text-align:right; color:#666; padding-right:.5em; }
-    ul { margin-left: 2em; margin-top: 1em; }
     #summary { background: #e0ebff; }
     #summary h2 { font-weight: normal; color: #666; }
     #explanation { background:#eee; }
@@ -1095,11 +1147,10 @@ EMPTY_URLCONF_TEMPLATE = """
 </div>
 
 <div id="instructions">
-  <p>Of course, you haven't actually done any work yet. Here's what to do next:</p>
-  <ul>
-    <li>If you plan to use a database, edit the <code>DATABASES</code> setting in <code>{{ project_name }}/settings.py</code>.</li>
-    <li>Start your first app by running <code>python manage.py startapp [appname]</code>.</li>
-  </ul>
+  <p>
+    Of course, you haven't actually done any work yet.
+    Next, start your first app by running <code>python manage.py startapp [appname]</code>.
+  </p>
 </div>
 
 <div id="explanation">

@@ -11,12 +11,13 @@ from django.contrib.gis import memoryview
 # super-class for mutable list behavior
 from django.contrib.gis.geos.mutable_list import ListMixin
 
+from django.contrib.gis.gdal.error import SRSException
+
 # GEOS-related dependencies.
 from django.contrib.gis.geos.base import GEOSBase, gdal
 from django.contrib.gis.geos.coordseq import GEOSCoordSeq
 from django.contrib.gis.geos.error import GEOSException, GEOSIndexError
 from django.contrib.gis.geos.libgeos import GEOM_PTR, GEOS_PREPARE
-from django.contrib.gis.geos.mutable_list import ListMixin
 
 # All other functions in this module come from the ctypes
 # prototypes module -- which handles all interaction with
@@ -65,7 +66,8 @@ class GEOSGeometry(GEOSBase, ListMixin):
             wkt_m = wkt_regex.match(geo_input)
             if wkt_m:
                 # Handling WKT input.
-                if wkt_m.group('srid'): srid = int(wkt_m.group('srid'))
+                if wkt_m.group('srid'):
+                    srid = int(wkt_m.group('srid'))
                 g = wkt_r().read(force_bytes(wkt_m.group('wkt')))
             elif hex_regex.match(geo_input):
                 # Handling HEXEWKB input.
@@ -87,7 +89,7 @@ class GEOSGeometry(GEOSBase, ListMixin):
             # Invalid geometry type.
             raise TypeError('Improper geometry input type: %s' % str(type(geo_input)))
 
-        if bool(g):
+        if g:
             # Setting the pointer object with a valid pointer.
             self.ptr = g
         else:
@@ -99,7 +101,8 @@ class GEOSGeometry(GEOSBase, ListMixin):
     def _post_init(self, srid):
         "Helper routine for performing post-initialization setup."
         # Setting the SRID, if given.
-        if srid and isinstance(srid, int): self.srid = srid
+        if srid and isinstance(srid, int):
+            self.srid = srid
 
         # Setting the class type (e.g., Point, Polygon, etc.)
         self.__class__ = GEOS_CLASSES[self.geom_typeid]
@@ -113,7 +116,8 @@ class GEOSGeometry(GEOSBase, ListMixin):
         Destroys this Geometry; in other words, frees the memory used by the
         GEOS C++ object.
         """
-        if self._ptr: capi.destroy_geom(self._ptr)
+        if self._ptr:
+            capi.destroy_geom(self._ptr)
 
     def __copy__(self):
         """
@@ -148,7 +152,8 @@ class GEOSGeometry(GEOSBase, ListMixin):
         # Instantiating from the tuple state that was pickled.
         wkb, srid = state
         ptr = wkb_r().read(memoryview(wkb))
-        if not ptr: raise GEOSException('Invalid Geometry loaded from pickled state.')
+        if not ptr:
+            raise GEOSException('Invalid Geometry loaded from pickled state.')
         self.ptr = ptr
         self._post_init(srid)
 
@@ -360,8 +365,10 @@ class GEOSGeometry(GEOSBase, ListMixin):
     def get_srid(self):
         "Gets the SRID for the geometry, returns None if no SRID is set."
         s = capi.geos_get_srid(self.ptr)
-        if s == 0: return None
-        else: return s
+        if s == 0:
+            return None
+        else:
+            return s
 
     def set_srid(self, srid):
         "Sets the SRID for the geometry."
@@ -376,13 +383,15 @@ class GEOSGeometry(GEOSBase, ListMixin):
         are *not* included in this representation because GEOS does not yet
         support serializing them.
         """
-        if self.get_srid(): return 'SRID=%s;%s' % (self.srid, self.wkt)
-        else: return self.wkt
+        if self.get_srid():
+            return 'SRID=%s;%s' % (self.srid, self.wkt)
+        else:
+            return self.wkt
 
     @property
     def wkt(self):
         "Returns the WKT (Well-Known Text) representation of this Geometry."
-        return wkt_w().write(self).decode()
+        return wkt_w(3 if self.hasz else 2).write(self).decode()
 
     @property
     def hex(self):
@@ -393,7 +402,7 @@ class GEOSGeometry(GEOSBase, ListMixin):
         """
         # A possible faster, all-python, implementation:
         #  str(self.wkb).encode('hex')
-        return wkb_w(self.hasz and 3 or 2).write_hex(self)
+        return wkb_w(3 if self.hasz else 2).write_hex(self)
 
     @property
     def hexewkb(self):
@@ -405,7 +414,7 @@ class GEOSGeometry(GEOSBase, ListMixin):
         if self.hasz and not GEOS_PREPARE:
             # See: http://trac.osgeo.org/geos/ticket/216
             raise GEOSException('Upgrade GEOS to 3.1 to get valid 3D HEXEWKB.')
-        return ewkb_w(self.hasz and 3 or 2).write_hex(self)
+        return ewkb_w(3 if self.hasz else 2).write_hex(self)
 
     @property
     def json(self):
@@ -425,7 +434,7 @@ class GEOSGeometry(GEOSBase, ListMixin):
         as a Python buffer.  SRID and Z values are not included, use the
         `ewkb` property instead.
         """
-        return wkb_w(self.hasz and 3 or 2).write(self)
+        return wkb_w(3 if self.hasz else 2).write(self)
 
     @property
     def ewkb(self):
@@ -437,7 +446,7 @@ class GEOSGeometry(GEOSBase, ListMixin):
         if self.hasz and not GEOS_PREPARE:
             # See: http://trac.osgeo.org/geos/ticket/216
             raise GEOSException('Upgrade GEOS to 3.1 to get valid 3D EWKB.')
-        return ewkb_w(self.hasz and 3 or 2).write(self)
+        return ewkb_w(3 if self.hasz else 2).write(self)
 
     @property
     def kml(self):
@@ -460,24 +469,26 @@ class GEOSGeometry(GEOSBase, ListMixin):
     @property
     def ogr(self):
         "Returns the OGR Geometry for this Geometry."
-        if gdal.HAS_GDAL:
-            if self.srid:
-                return gdal.OGRGeometry(self.wkb, self.srid)
-            else:
-                return gdal.OGRGeometry(self.wkb)
-        else:
+        if not gdal.HAS_GDAL:
             raise GEOSException('GDAL required to convert to an OGRGeometry.')
+        if self.srid:
+            try:
+                return gdal.OGRGeometry(self.wkb, self.srid)
+            except SRSException:
+                pass
+        return gdal.OGRGeometry(self.wkb)
 
     @property
     def srs(self):
         "Returns the OSR SpatialReference for SRID of this Geometry."
-        if gdal.HAS_GDAL:
-            if self.srid:
-                return gdal.SpatialReference(self.srid)
-            else:
-                return None
-        else:
+        if not gdal.HAS_GDAL:
             raise GEOSException('GDAL required to return a SpatialReference object.')
+        if self.srid:
+            try:
+                return gdal.SpatialReference(self.srid)
+            except SRSException:
+                pass
+        return None
 
     @property
     def crs(self):
@@ -696,14 +707,14 @@ from django.contrib.gis.geos.linestring import LineString, LinearRing
 from django.contrib.gis.geos.point import Point
 from django.contrib.gis.geos.polygon import Polygon
 from django.contrib.gis.geos.collections import GeometryCollection, MultiPoint, MultiLineString, MultiPolygon
-GEOS_CLASSES = {0 : Point,
-                1 : LineString,
-                2 : LinearRing,
-                3 : Polygon,
-                4 : MultiPoint,
-                5 : MultiLineString,
-                6 : MultiPolygon,
-                7 : GeometryCollection,
+GEOS_CLASSES = {0: Point,
+                1: LineString,
+                2: LinearRing,
+                3: Polygon,
+                4: MultiPoint,
+                5: MultiLineString,
+                6: MultiPolygon,
+                7: GeometryCollection,
                 }
 
 # If supported, import the PreparedGeometry class.

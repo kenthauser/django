@@ -2,11 +2,15 @@
 
 from functools import wraps, update_wrapper, WRAPPER_ASSIGNMENTS
 
+from django.utils import six
+
+
 class classonlymethod(classmethod):
     def __get__(self, instance, owner):
         if instance is not None:
             raise AttributeError("This method is available only on the view class.")
         return super(classonlymethod, self).__get__(instance, owner)
+
 
 def method_decorator(decorator):
     """
@@ -26,6 +30,7 @@ def method_decorator(decorator):
         # In case 'decorator' adds attributes to the function it decorates, we
         # want to copy those. We don't have access to bound_func in this scope,
         # but we can cheat by using it on a dummy function.
+
         @decorator
         def dummy(*args, **kwargs):
             pass
@@ -68,14 +73,19 @@ def decorator_from_middleware(middleware_class):
 def available_attrs(fn):
     """
     Return the list of functools-wrappable attributes on a callable.
-    This is required as a workaround for http://bugs.python.org/issue3445.
+    This is required as a workaround for http://bugs.python.org/issue3445
+    under Python 2.
     """
-    return tuple(a for a in WRAPPER_ASSIGNMENTS if hasattr(fn, a))
+    if six.PY3:
+        return WRAPPER_ASSIGNMENTS
+    else:
+        return tuple(a for a in WRAPPER_ASSIGNMENTS if hasattr(fn, a))
 
 
 def make_middleware_decorator(middleware_class):
     def _make_decorator(*m_args, **m_kwargs):
         middleware = middleware_class(*m_args, **m_kwargs)
+
         def _decorator(view_func):
             @wraps(view_func, assigned=available_attrs(view_func))
             def _wrapped_view(request, *args, **kwargs):

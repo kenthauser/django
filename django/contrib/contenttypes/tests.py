@@ -6,6 +6,7 @@ from django.contrib.contenttypes.views import shortcut
 from django.contrib.sites.models import Site, get_current_site
 from django.http import HttpRequest, Http404
 from django.test import TestCase
+from django.test.utils import override_settings
 from django.utils.http import urlquote
 from django.utils import six
 from django.utils.encoding import python_2_unicode_compatible
@@ -14,9 +15,11 @@ from django.utils.encoding import python_2_unicode_compatible
 class ConcreteModel(models.Model):
     name = models.CharField(max_length=10)
 
+
 class ProxyModel(ConcreteModel):
     class Meta:
         proxy = True
+
 
 @python_2_unicode_compatible
 class FooWithoutUrl(models.Model):
@@ -38,6 +41,7 @@ class FooWithUrl(FooWithoutUrl):
     def get_absolute_url(self):
         return "/users/%s/" % urlquote(self.name)
 
+
 class FooWithBrokenAbsoluteUrl(FooWithoutUrl):
     """
     Fake model defining a ``get_absolute_url`` method containing an error
@@ -46,14 +50,15 @@ class FooWithBrokenAbsoluteUrl(FooWithoutUrl):
     def get_absolute_url(self):
         return "/users/%s/" % self.unknown_field
 
+
 class ContentTypesTests(TestCase):
 
     def setUp(self):
-        self.old_Site_meta_installed = Site._meta.installed
+        self._old_installed = Site._meta.app_config.installed
         ContentType.objects.clear_cache()
 
     def tearDown(self):
-        Site._meta.installed = self.old_Site_meta_installed
+        Site._meta.app_config.installed = self._old_installed
         ContentType.objects.clear_cache()
 
     def test_lookup_cache(self):
@@ -202,7 +207,7 @@ class ContentTypesTests(TestCase):
             DeferredProxyModel: proxy_model_ct,
         })
 
-
+    @override_settings(ALLOWED_HOSTS=['example.com'])
     def test_shortcut_view(self):
         """
         Check that the shortcut view (used for the admin "view on site"
@@ -218,12 +223,12 @@ class ContentTypesTests(TestCase):
         user_ct = ContentType.objects.get_for_model(FooWithUrl)
         obj = FooWithUrl.objects.create(name="john")
 
-        if Site._meta.installed:
-            response = shortcut(request, user_ct.id, obj.id)
-            self.assertEqual("http://%s/users/john/" % get_current_site(request).domain,
-                             response._headers.get("location")[1])
+        Site._meta.app_config.installed = True
+        response = shortcut(request, user_ct.id, obj.id)
+        self.assertEqual("http://%s/users/john/" % get_current_site(request).domain,
+                         response._headers.get("location")[1])
 
-        Site._meta.installed = False
+        Site._meta.app_config.installed = False
         response = shortcut(request, user_ct.id, obj.id)
         self.assertEqual("http://Example.com/users/john/",
                          response._headers.get("location")[1])
@@ -267,8 +272,15 @@ class ContentTypesTests(TestCase):
         is defined anymore.
         """
         ct = ContentType.objects.create(
-            name = 'Old model',
-            app_label = 'contenttypes',
-            model = 'OldModel',
+            name='Old model',
+            app_label='contenttypes',
+            model='OldModel',
         )
         self.assertEqual(six.text_type(ct), 'Old model')
+        self.assertIsNone(ct.model_class())
+
+        # Make sure stale ContentTypes can be fetched like any other object.
+        # Before Django 1.6 this caused a NoneType error in the caching mechanism.
+        # Instead, just return the ContentType object and let the app detect stale states.
+        ct_fetched = ContentType.objects.get_for_id(ct.pk)
+        self.assertIsNone(ct_fetched.model_class())

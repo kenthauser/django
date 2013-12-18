@@ -11,6 +11,7 @@ from django.template.base import TemplateDoesNotExist
 from django.template.loader import BaseLoader
 from django.utils import six
 
+
 class Loader(BaseLoader):
     is_usable = resource_string is not None
 
@@ -27,9 +28,7 @@ class Loader(BaseLoader):
                     resource = resource_string(app, pkg_name)
                 except Exception:
                     continue
-                if not six.PY3:
+                if six.PY2:
                     resource = resource.decode(settings.FILE_CHARSET)
                 return (resource, 'egg:%s:%s' % (app, pkg_name))
         raise TemplateDoesNotExist(template_name)
-
-_loader = Loader()

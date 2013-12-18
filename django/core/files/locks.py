@@ -14,7 +14,7 @@ Example Usage::
     ...     f.write('Django')
 """
 
-__all__ = ('LOCK_EX','LOCK_SH','LOCK_NB','lock','unlock')
+__all__ = ('LOCK_EX', 'LOCK_SH', 'LOCK_NB', 'lock', 'unlock')
 
 system_type = None
 
@@ -39,9 +39,10 @@ try:
 except (ImportError, AttributeError):
     pass
 
+
 def fd(f):
     """Get a filedescriptor from something which could be a file or an fd."""
-    return hasattr(f, 'fileno') and f.fileno() or f
+    return f.fileno() if hasattr(f, 'fileno') else f
 
 if system_type == 'nt':
     def lock(file, flags):

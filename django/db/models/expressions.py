@@ -1,5 +1,9 @@
 import datetime
+
+from django.db.models.aggregates import refs_aggregate
+from django.db.models.constants import LOOKUP_SEP
 from django.utils import tree
+
 
 class ExpressionNode(tree.Node):
     """
@@ -10,6 +14,7 @@ class ExpressionNode(tree.Node):
     SUB = '-'
     MUL = '*'
     DIV = '/'
+    POW = '^'
     MOD = '%%'  # This is a quoted % operator - it is quoted
                 # because it can be used in strings that also
                 # have parameter substitution.
@@ -37,6 +42,18 @@ class ExpressionNode(tree.Node):
             obj.add(other, connector)
         return obj
 
+    def contains_aggregate(self, existing_aggregates):
+        if self.children:
+            return any(child.contains_aggregate(existing_aggregates)
+                       for child in self.children
+                       if hasattr(child, 'contains_aggregate'))
+        else:
+            return refs_aggregate(self.name.split(LOOKUP_SEP),
+                                  existing_aggregates)
+
+    def prepare_database_save(self, unused):
+        return self
+
     ###################
     # VISITOR METHODS #
     ###################
@@ -62,10 +79,15 @@ class ExpressionNode(tree.Node):
 
     def __truediv__(self, other):
         return self._combine(other, self.DIV, False)
-    __div__ = __truediv__ # Python 2 compatibility
+
+    def __div__(self, other):  # Python 2 compatibility
+        return type(self).__truediv__(self, other)
 
     def __mod__(self, other):
         return self._combine(other, self.MOD, False)
+
+    def __pow__(self, other):
+        return self._combine(other, self.POW, False)
 
     def __and__(self, other):
         raise NotImplementedError(
@@ -94,10 +116,15 @@ class ExpressionNode(tree.Node):
 
     def __rtruediv__(self, other):
         return self._combine(other, self.DIV, True)
-    __rdiv__ = __rtruediv__ # Python 2 compatibility
+
+    def __rdiv__(self, other):  # Python 2 compatibility
+        return type(self).__rtruediv__(self, other)
 
     def __rmod__(self, other):
         return self._combine(other, self.MOD, True)
+
+    def __rpow__(self, other):
+        return self._combine(other, self.POW, True)
 
     def __rand__(self, other):
         raise NotImplementedError(
@@ -109,8 +136,6 @@ class ExpressionNode(tree.Node):
             "Use .bitand() and .bitor() for bitwise logical operations."
         )
 
-    def prepare_database_save(self, unused):
-        return self
 
 class F(ExpressionNode):
     """
@@ -120,16 +145,12 @@ class F(ExpressionNode):
         super(F, self).__init__(None, None, False)
         self.name = name
 
-    def __deepcopy__(self, memodict):
-        obj = super(F, self).__deepcopy__(memodict)
-        obj.name = self.name
-        return obj
-
     def prepare(self, evaluator, query, allow_joins):
         return evaluator.prepare_leaf(self, query, allow_joins)
 
     def evaluate(self, evaluator, qn, connection):
         return evaluator.evaluate_leaf(self, qn, connection)
+
 
 class DateModifierNode(ExpressionNode):
     """
@@ -151,10 +172,10 @@ class DateModifierNode(ExpressionNode):
         (A custom function is used in order to preserve six digits of fractional
         second information on sqlite, and to format both date and datetime values.)
 
-    Note that microsecond comparisons are not well supported with MySQL, since 
+    Note that microsecond comparisons are not well supported with MySQL, since
     MySQL does not store microsecond information.
 
-    Only adding and subtracting timedeltas is supported, attempts to use other 
+    Only adding and subtracting timedeltas is supported, attempts to use other
     operations raise a TypeError.
     """
     def __init__(self, children, connector, negated=False):

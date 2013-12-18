@@ -1,10 +1,9 @@
-from __future__ import absolute_import, unicode_literals
+from __future__ import unicode_literals
 
 import copy
 import os
 import re
 import sys
-import warnings
 from io import BytesIO
 from pprint import pformat
 try:
@@ -15,9 +14,9 @@ except ImportError:
 
 from django.conf import settings
 from django.core import signing
-from django.core.exceptions import SuspiciousOperation, ImproperlyConfigured
+from django.core.exceptions import DisallowedHost, ImproperlyConfigured
 from django.core.files import uploadhandler
-from django.http.multipartparser import MultiPartParser
+from django.http.multipartparser import MultiPartParser, MultiPartParserError
 from django.utils import six
 from django.utils.datastructures import MultiValueDict, ImmutableList
 from django.utils.encoding import force_bytes, force_text, force_str, iri_to_uri
@@ -25,9 +24,19 @@ from django.utils.encoding import force_bytes, force_text, force_str, iri_to_uri
 
 RAISE_ERROR = object()
 absolute_http_url_re = re.compile(r"^https?://", re.I)
+host_validation_re = re.compile(r"^([a-z0-9.-]+|\[[a-f0-9]*:[a-f0-9:]+\])(:\d+)?$")
 
 
 class UnreadablePostError(IOError):
+    pass
+
+
+class RawPostDataException(Exception):
+    """
+    You cannot access raw_post_data from a request that has
+    multipart/* POST data if it has been accessed via POST,
+    FILES, etc..
+    """
     pass
 
 
@@ -39,10 +48,15 @@ class HttpRequest(object):
     _upload_handlers = []
 
     def __init__(self):
+        # WARNING: The `WSGIRequest` subclass doesn't call `super`.
+        # Any variable assignment made here should also happen in
+        # `WSGIRequest.__init__()`.
+
         self.GET, self.POST, self.COOKIES, self.META, self.FILES = {}, {}, {}, {}, {}
         self.path = ''
         self.path_info = ''
         self.method = None
+        self.resolver_match = None
         self._post_parse_error = False
 
     def __repr__(self):
@@ -52,7 +66,7 @@ class HttpRequest(object):
         """Returns the HTTP host using the environment or request headers."""
         # We try three options, in order of decreasing preference.
         if settings.USE_X_FORWARDED_HOST and (
-            'HTTP_X_FORWARDED_HOST' in self.META):
+                'HTTP_X_FORWARDED_HOST' in self.META):
             host = self.META['HTTP_X_FORWARDED_HOST']
         elif 'HTTP_HOST' in self.META:
             host = self.META['HTTP_HOST']
@@ -63,11 +77,20 @@ class HttpRequest(object):
             if server_port != ('443' if self.is_secure() else '80'):
                 host = '%s:%s' % (host, server_port)
 
-        # Disallow potentially poisoned hostnames.
-        if set(';/?@&=+$,').intersection(host):
-            raise SuspiciousOperation('Invalid HTTP_HOST header: %s' % host)
+        # There is no hostname validation when DEBUG=True
+        if settings.DEBUG:
+            return host
 
-        return host
+        domain, port = split_domain_port(host)
+        if domain and validate_host(domain, settings.ALLOWED_HOSTS):
+            return host
+        else:
+            msg = "Invalid HTTP_HOST header: %r." % host
+            if domain:
+                msg += "You may need to add %r to ALLOWED_HOSTS." % domain
+            else:
+                msg += "The domain name provided is not valid according to RFC 1034/1035"
+            raise DisallowedHost(msg)
 
     def get_full_path(self):
         # RFC 3986 requires query string arguments to be in the ASCII range.
@@ -106,15 +129,16 @@ class HttpRequest(object):
         if not location:
             location = self.get_full_path()
         if not absolute_http_url_re.match(location):
-            current_uri = '%s://%s%s' % ('https' if self.is_secure() else 'http',
+            current_uri = '%s://%s%s' % (self.scheme,
                                          self.get_host(), self.path)
             location = urljoin(current_uri, location)
         return iri_to_uri(location)
 
-    def _is_secure(self):
-        return os.environ.get("HTTPS") == "on"
+    def _get_scheme(self):
+        return 'https' if os.environ.get("HTTPS") == "on" else 'http'
 
-    def is_secure(self):
+    @property
+    def scheme(self):
         # First, check the SECURE_PROXY_SSL_HEADER setting.
         if settings.SECURE_PROXY_SSL_HEADER:
             try:
@@ -122,11 +146,13 @@ class HttpRequest(object):
             except ValueError:
                 raise ImproperlyConfigured('The SECURE_PROXY_SSL_HEADER setting must be a tuple containing two values.')
             if self.META.get(header, None) == value:
-                return True
-
-        # Failing that, fall back to _is_secure(), which is a hook for
+                return 'https'
+        # Failing that, fall back to _get_scheme(), which is a hook for
         # subclasses to implement.
-        return self._is_secure()
+        return self._get_scheme()
+
+    def is_secure(self):
+        return self.scheme == 'https'
 
     def is_ajax(self):
         return self.META.get('HTTP_X_REQUESTED_WITH') == 'XMLHttpRequest'
@@ -178,18 +204,13 @@ class HttpRequest(object):
     def body(self):
         if not hasattr(self, '_body'):
             if self._read_started:
-                raise Exception("You cannot access body after reading from request's data stream")
+                raise RawPostDataException("You cannot access body after reading from request's data stream")
             try:
                 self._body = self.read()
             except IOError as e:
                 six.reraise(UnreadablePostError, UnreadablePostError(*e.args), sys.exc_info()[2])
             self._stream = BytesIO(self._body)
         return self._body
-
-    @property
-    def raw_post_data(self):
-        warnings.warn('HttpRequest.raw_post_data has been deprecated. Use HttpRequest.body instead.', DeprecationWarning)
-        return self.body
 
     def _mark_post_parse_error(self):
         self._post = QueryDict('')
@@ -213,7 +234,7 @@ class HttpRequest(object):
                 data = self
             try:
                 self._post, self._files = self.parse_file_upload(self.META, data)
-            except:
+            except MultiPartParserError:
                 # An error occured while parsing POST data. Since when
                 # formatting the error the request handler might access
                 # self.POST, set self._post and self._file to prevent
@@ -228,21 +249,27 @@ class HttpRequest(object):
         else:
             self._post, self._files = QueryDict('', encoding=self._encoding), MultiValueDict()
 
-    ## File-like and iterator interface.
-    ##
-    ## Expects self._stream to be set to an appropriate source of bytes by
-    ## a corresponding request subclass (e.g. WSGIRequest).
-    ## Also when request data has already been read by request.POST or
-    ## request.body, self._stream points to a BytesIO instance
-    ## containing that data.
+    # File-like and iterator interface.
+    #
+    # Expects self._stream to be set to an appropriate source of bytes by
+    # a corresponding request subclass (e.g. WSGIRequest).
+    # Also when request data has already been read by request.POST or
+    # request.body, self._stream points to a BytesIO instance
+    # containing that data.
 
     def read(self, *args, **kwargs):
         self._read_started = True
-        return self._stream.read(*args, **kwargs)
+        try:
+            return self._stream.read(*args, **kwargs)
+        except IOError as e:
+            six.reraise(UnreadablePostError, UnreadablePostError(*e.args), sys.exc_info()[2])
 
     def readline(self, *args, **kwargs):
         self._read_started = True
-        return self._stream.readline(*args, **kwargs)
+        try:
+            return self._stream.readline(*args, **kwargs)
+        except IOError as e:
+            six.reraise(UnreadablePostError, UnreadablePostError(*e.args), sys.exc_info()[2])
 
     def xreadlines(self):
         while True:
@@ -276,6 +303,9 @@ class QueryDict(MultiValueDict):
             encoding = settings.DEFAULT_CHARSET
         self.encoding = encoding
         if six.PY3:
+            if isinstance(query_string, bytes):
+                # query_string contains URL-encoded data, a subset of ASCII.
+                query_string = query_string.decode()
             for key, value in parse_qsl(query_string or '',
                                         keep_blank_values=True,
                                         encoding=encoding):
@@ -451,3 +481,57 @@ def bytes_to_text(s, encoding):
         return six.text_type(s, encoding, 'replace')
     else:
         return s
+
+
+def split_domain_port(host):
+    """
+    Return a (domain, port) tuple from a given host.
+
+    Returned domain is lower-cased. If the host is invalid, the domain will be
+    empty.
+    """
+    host = host.lower()
+
+    if not host_validation_re.match(host):
+        return '', ''
+
+    if host[-1] == ']':
+        # It's an IPv6 address without a port.
+        return host, ''
+    bits = host.rsplit(':', 1)
+    if len(bits) == 2:
+        return tuple(bits)
+    return bits[0], ''
+
+
+def validate_host(host, allowed_hosts):
+    """
+    Validate the given host for this site.
+
+    Check that the host looks valid and matches a host or host pattern in the
+    given list of ``allowed_hosts``. Any pattern beginning with a period
+    matches a domain and all its subdomains (e.g. ``.example.com`` matches
+    ``example.com`` and any subdomain), ``*`` matches anything, and anything
+    else must match exactly.
+
+    Note: This function assumes that the given host is lower-cased and has
+    already had the port, if any, stripped off.
+
+    Return ``True`` for a valid host, ``False`` otherwise.
+
+    """
+    host = host[:-1] if host.endswith('.') else host
+
+    for pattern in allowed_hosts:
+        pattern = pattern.lower()
+        match = (
+            pattern == '*' or
+            pattern.startswith('.') and (
+                host.endswith(pattern) or host == pattern[1:]
+            ) or
+            pattern == host
+        )
+        if match:
+            return True
+
+    return False
