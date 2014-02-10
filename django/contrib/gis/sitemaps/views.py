@@ -2,10 +2,10 @@ from __future__ import unicode_literals
 
 import warnings
 
-from django.core.apps import app_cache
+from django.apps import apps
 from django.http import HttpResponse, Http404
 from django.template import loader
-from django.contrib.sites.models import get_current_site
+from django.contrib.sites.shortcuts import get_current_site
 from django.core import urlresolvers
 from django.core.paginator import EmptyPage, PageNotAnInteger
 from django.contrib.gis.db.models.fields import GeometryField
@@ -81,8 +81,9 @@ def kml(request, label, model, field_name=None, compress=False, using=DEFAULT_DB
     must be that of a geographic field.
     """
     placemarks = []
-    klass = app_cache.get_model(label, model)
-    if not klass:
+    try:
+        klass = apps.get_model(label, model)
+    except LookupError:
         raise Http404('You must supply a valid app label and module name.  Got "%s.%s"' % (label, model))
 
     if field_name:

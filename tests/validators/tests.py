@@ -18,6 +18,7 @@ from django.test.utils import str_prefix
 
 
 NOW = datetime.now()
+EXTENDED_SCHEMES = ['http', 'https', 'ftp', 'ftps', 'git', 'file']
 
 TEST_DATA = (
     # (validator, value, expected),
@@ -141,6 +142,7 @@ TEST_DATA = (
     (MinLengthValidator(10), '', ValidationError),
 
     (URLValidator(), 'http://www.djangoproject.com/', None),
+    (URLValidator(), 'HTTP://WWW.DJANGOPROJECT.COM/', None),
     (URLValidator(), 'http://localhost/', None),
     (URLValidator(), 'http://example.com/', None),
     (URLValidator(), 'http://www.example.com/', None),
@@ -155,6 +157,8 @@ TEST_DATA = (
     (URLValidator(), 'https://example.com/', None),
     (URLValidator(), 'ftp://example.com/', None),
     (URLValidator(), 'ftps://example.com/', None),
+    (URLValidator(EXTENDED_SCHEMES), 'file://localhost/path', None),
+    (URLValidator(EXTENDED_SCHEMES), 'git://example.com/', None),
 
     (URLValidator(), 'foo', ValidationError),
     (URLValidator(), 'http://', ValidationError),
@@ -165,6 +169,9 @@ TEST_DATA = (
     (URLValidator(), 'http://-invalid.com', ValidationError),
     (URLValidator(), 'http://inv-.alid-.com', ValidationError),
     (URLValidator(), 'http://inv-.-alid.com', ValidationError),
+    (URLValidator(), 'file://localhost/path', ValidationError),
+    (URLValidator(), 'git://example.com/', ValidationError),
+    (URLValidator(EXTENDED_SCHEMES), 'git://-invalid.com', ValidationError),
 
     (BaseValidator(True), True, None),
     (BaseValidator(True), False, ValidationError),
@@ -180,6 +187,10 @@ TEST_DATA = (
 
     (RegexValidator('x'), 'y', ValidationError),
     (RegexValidator(re.compile('x')), 'y', ValidationError),
+    (RegexValidator('x', inverse_match=True), 'y', None),
+    (RegexValidator(re.compile('x'), inverse_match=True), 'y', None),
+    (RegexValidator('x', inverse_match=True), 'x', ValidationError),
+    (RegexValidator(re.compile('x'), inverse_match=True), 'x', ValidationError),
 )
 
 
@@ -237,3 +248,59 @@ for validator, value, expected in TEST_DATA:
     name, method = create_simple_test_method(validator, expected, value, test_counter)
     setattr(TestSimpleValidators, name, method)
     test_counter += 1
+
+
+class TestValidatorEquality(TestCase):
+    """
+    Tests that validators have valid equality operators (#21638)
+    """
+
+    def test_regex_equality(self):
+        self.assertEqual(
+            RegexValidator(r'^(?:[a-z0-9\.\-]*)://'),
+            RegexValidator(r'^(?:[a-z0-9\.\-]*)://'),
+        )
+        self.assertNotEqual(
+            RegexValidator(r'^(?:[a-z0-9\.\-]*)://'),
+            RegexValidator(r'^(?:[0-9\.\-]*)://'),
+        )
+        self.assertEqual(
+            RegexValidator(r'^(?:[a-z0-9\.\-]*)://', "oh noes", "invalid"),
+            RegexValidator(r'^(?:[a-z0-9\.\-]*)://', "oh noes", "invalid"),
+        )
+        self.assertNotEqual(
+            RegexValidator(r'^(?:[a-z0-9\.\-]*)://', "oh", "invalid"),
+            RegexValidator(r'^(?:[a-z0-9\.\-]*)://', "oh noes", "invalid"),
+        )
+        self.assertNotEqual(
+            RegexValidator(r'^(?:[a-z0-9\.\-]*)://', "oh noes", "invalid"),
+            RegexValidator(r'^(?:[a-z0-9\.\-]*)://'),
+        )
+
+    def test_email_equality(self):
+        self.assertEqual(
+            EmailValidator(),
+            EmailValidator(),
+        )
+        self.assertNotEqual(
+            EmailValidator(message="BAD EMAIL"),
+            EmailValidator(),
+        )
+        self.assertEqual(
+            EmailValidator(message="BAD EMAIL", code="bad"),
+            EmailValidator(message="BAD EMAIL", code="bad"),
+        )
+
+    def test_basic_equality(self):
+        self.assertEqual(
+            MaxValueValidator(44),
+            MaxValueValidator(44),
+        )
+        self.assertNotEqual(
+            MaxValueValidator(44),
+            MinValueValidator(44),
+        )
+        self.assertNotEqual(
+            MinValueValidator(45),
+            MinValueValidator(11),
+        )

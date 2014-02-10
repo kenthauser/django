@@ -47,19 +47,19 @@ class MigrationAutodetector(object):
         """
         # We'll store migrations as lists by app names for now
         self.migrations = {}
-        old_app_cache = self.from_state.render()
-        new_app_cache = self.to_state.render()
+        old_apps = self.from_state.render()
+        new_apps = self.to_state.render()
         # Prepare lists of old/new model keys that we care about
         # (i.e. ignoring proxy ones)
         old_model_keys = [
             (al, mn)
             for al, mn in self.from_state.models.keys()
-            if not old_app_cache.get_model(al, mn)._meta.proxy
+            if not old_apps.get_model(al, mn)._meta.proxy
         ]
         new_model_keys = [
             (al, mn)
             for al, mn in self.to_state.models.keys()
-            if not new_app_cache.get_model(al, mn)._meta.proxy
+            if not new_apps.get_model(al, mn)._meta.proxy
         ]
         # Adding models. Phase 1 is adding models with no outward relationships.
         added_models = set(new_model_keys) - set(old_model_keys)
@@ -68,12 +68,17 @@ class MigrationAutodetector(object):
             model_state = self.to_state.models[app_label, model_name]
             # Are there any relationships out from this model? if so, punt it to the next phase.
             related_fields = []
-            for field in new_app_cache.get_model(app_label, model_name)._meta.local_fields:
+            for field in new_apps.get_model(app_label, model_name)._meta.local_fields:
                 if field.rel:
                     if field.rel.to:
-                        related_fields.append((field.name, field.rel.to._meta.app_label.lower(), field.rel.to._meta.object_name.lower()))
-                    if hasattr(field.rel, "through") and not field.rel.though._meta.auto_created:
-                        related_fields.append((field.name, field.rel.through._meta.app_label.lower(), field.rel.through._meta.object_name.lower()))
+                        related_fields.append((field.name, field.rel.to._meta.app_label, field.rel.to._meta.model_name))
+                    if hasattr(field.rel, "through") and not field.rel.through._meta.auto_created:
+                        related_fields.append((field.name, field.rel.through._meta.app_label, field.rel.through._meta.model_name))
+            for field in new_apps.get_model(app_label, model_name)._meta.local_many_to_many:
+                if field.rel.to:
+                    related_fields.append((field.name, field.rel.to._meta.app_label, field.rel.to._meta.model_name))
+                if hasattr(field.rel, "through") and not field.rel.through._meta.auto_created:
+                    related_fields.append((field.name, field.rel.through._meta.app_label, field.rel.through._meta.model_name))
             if related_fields:
                 pending_add[app_label, model_name] = related_fields
             else:
@@ -105,8 +110,12 @@ class MigrationAutodetector(object):
                     )
                 )
                 for field_name, other_app_label, other_model_name in related_fields:
-                    if app_label != other_app_label:
-                        self.add_dependency(app_label, other_app_label)
+                    # If it depends on a swappable something, add a dynamic depend'cy
+                    swappable_setting = new_apps.get_model(app_label, model_name)._meta.get_field_by_name(field_name)[0].swappable_setting
+                    if swappable_setting is not None:
+                        self.add_swappable_dependency(app_label, swappable_setting)
+                    elif app_label != other_app_label:
+                            self.add_dependency(app_label, other_app_label)
                 del pending_add[app_label, model_name]
             # Ah well, we'll need to split one. Pick deterministically.
             else:
@@ -140,7 +149,11 @@ class MigrationAutodetector(object):
                 ),
                 new=True,
             )
-            if app_label != other_app_label:
+            # If it depends on a swappable something, add a dynamic depend'cy
+            swappable_setting = new_apps.get_model(app_label, model_name)._meta.get_field_by_name(field_name)[0].swappable_setting
+            if swappable_setting is not None:
+                self.add_swappable_dependency(app_label, swappable_setting)
+            elif app_label != other_app_label:
                 self.add_dependency(app_label, other_app_label)
         # Removing models
         removed_models = set(old_model_keys) - set(new_model_keys)
@@ -220,6 +233,9 @@ class MigrationAutodetector(object):
                         field=field,
                     )
                 )
+                swappable_setting = new_apps.get_model(app_label, model_name)._meta.get_field_by_name(field_name)[0].swappable_setting
+                if swappable_setting is not None:
+                    self.add_swappable_dependency(app_label, swappable_setting)
         # Old fields
         for app_label, model_name, field_name in old_fields - new_fields:
             old_model_state = self.from_state.models[app_label, model_name]
@@ -276,6 +292,13 @@ class MigrationAutodetector(object):
             dependency = (other_app_label, "__first__")
         self.migrations[app_label][-1].dependencies.append(dependency)
 
+    def add_swappable_dependency(self, app_label, setting_name):
+        """
+        Adds a dependency to the value of a swappable model setting.
+        """
+        dependency = ("__setting__", setting_name)
+        self.migrations[app_label][-1].dependencies.append(dependency)
+
     def _arrange_for_graph(self, changes, graph):
         """
         Takes in a result from changes() and a MigrationGraph,
@@ -299,6 +322,7 @@ class MigrationAutodetector(object):
                 for migration in migrations:
                     name_map[(app_label, migration.name)] = (app_label, "__first__")
                 del changes[app_label]
+                continue
             # Work out the next number in the sequence
             if app_leaf is None:
                 next_number = 1

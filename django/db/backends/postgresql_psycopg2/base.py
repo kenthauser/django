@@ -62,6 +62,7 @@ class DatabaseFeatures(BaseDatabaseFeatures):
     supports_combined_alters = True
     nulls_order_largest = True
     closed_cursor_error_class = InterfaceError
+    has_case_insensitive_like = False
 
 
 class DatabaseWrapper(BaseDatabaseWrapper):
@@ -81,6 +82,11 @@ class DatabaseWrapper(BaseDatabaseWrapper):
         'endswith': 'LIKE %s',
         'istartswith': 'LIKE UPPER(%s)',
         'iendswith': 'LIKE UPPER(%s)',
+    }
+
+    pattern_ops = {
+        'startswith': "LIKE %s || '%%%%'",
+        'istartswith': "LIKE UPPER(%s) || '%%%%'",
     }
 
     Database = Database
@@ -142,12 +148,14 @@ class DatabaseWrapper(BaseDatabaseWrapper):
                 conn_tz = get_parameter_status('TimeZone')
 
             if conn_tz != tz:
-                # Set the time zone in autocommit mode (see #17062)
-                self.set_autocommit(True)
-                self.connection.cursor().execute(
-                    self.ops.set_time_zone_sql(), [tz]
-                )
-        self.connection.set_isolation_level(self.isolation_level)
+                cursor = self.connection.cursor()
+                try:
+                    cursor.execute(self.ops.set_time_zone_sql(), [tz])
+                finally:
+                    cursor.close()
+                # Commit after setting the time zone (see #17062)
+                if not self.get_autocommit():
+                    self.connection.commit()
 
     def create_cursor(self):
         cursor = self.connection.cursor()

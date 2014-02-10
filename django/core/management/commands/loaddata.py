@@ -7,8 +7,8 @@ import warnings
 import zipfile
 from optparse import make_option
 
+from django.apps import apps
 from django.conf import settings
-from django.core.apps import app_cache
 from django.core import serializers
 from django.core.management.base import BaseCommand, CommandError
 from django.core.management.color import no_style
@@ -35,6 +35,8 @@ class Command(BaseCommand):
         make_option('--database', action='store', dest='database',
             default=DEFAULT_DB_ALIAS, help='Nominates a specific database to load '
                 'fixtures into. Defaults to the "default" database.'),
+        make_option('--app', action='store', dest='app_label',
+            default=None, help='Only look for fixtures in the specified app.'),
         make_option('--ignorenonexistent', '-i', action='store_true', dest='ignore',
             default=False, help='Ignores entries in the serialized data for fields'
                                 ' that do not currently exist on the model.'),
@@ -44,6 +46,8 @@ class Command(BaseCommand):
 
         self.ignore = options.get('ignore')
         self.using = options.get('database')
+        self.app_label = options.get('app_label')
+        self.hide_empty = options.get('hide_empty', False)
 
         if not len(fixture_labels):
             raise CommandError(
@@ -100,13 +104,14 @@ class Command(BaseCommand):
             if sequence_sql:
                 if self.verbosity >= 2:
                     self.stdout.write("Resetting sequences\n")
-                cursor = connection.cursor()
-                for line in sequence_sql:
-                    cursor.execute(line)
-                cursor.close()
+                with connection.cursor() as cursor:
+                    for line in sequence_sql:
+                        cursor.execute(line)
 
         if self.verbosity >= 1:
-            if self.fixture_object_count == self.loaded_object_count:
+            if self.fixture_count == 0 and self.hide_empty:
+                pass
+            elif self.fixture_object_count == self.loaded_object_count:
                 self.stdout.write("Installed %d object(s) from %d fixture(s)" %
                     (self.loaded_object_count, self.fixture_count))
             else:
@@ -230,7 +235,9 @@ class Command(BaseCommand):
         current directory.
         """
         dirs = []
-        for app_config in app_cache.get_app_configs():
+        for app_config in apps.get_app_configs():
+            if self.app_label and app_config.label != self.app_label:
+                continue
             d = os.path.join(app_config.path, 'fixtures')
             if os.path.isdir(d):
                 dirs.append(d)

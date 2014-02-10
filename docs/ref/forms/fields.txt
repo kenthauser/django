@@ -458,6 +458,12 @@ For each field, we describe the default widget used if you don't specify
 
     See also :ref:`format localization <format-localization>`.
 
+    .. deprecated:: 1.7
+
+        The ability to use :class:`SplitDateTimeWidget` with ``DateTimeField``
+        has been deprecated and will be removed in Django 1.9. Use
+        :class:`SplitDateTimeField` instead.
+
 ``DecimalField``
 ~~~~~~~~~~~~~~~~
 
@@ -936,7 +942,7 @@ Slightly complex built-in ``Field`` classes
                                   required=False),
                     )
                     super(PhoneField, self).__init__(
-                        self, error_messages=error_messages, fields=fields,
+                        error_messages=error_messages, fields=fields,
                         require_all_fields=False, *args, **kwargs)
 
     .. attribute:: MultiValueField.widget

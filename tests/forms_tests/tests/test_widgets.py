@@ -3,6 +3,7 @@ from __future__ import unicode_literals
 
 import copy
 import datetime
+import warnings
 
 from django.contrib.admin.tests import AdminSeleniumWebDriverTestCase
 from django.core.files.uploadedfile import SimpleUploadedFile
@@ -18,8 +19,7 @@ from django.forms.widgets import RadioFieldRenderer
 from django.utils.safestring import mark_safe
 from django.utils import six
 from django.utils.translation import activate, deactivate, override
-from django.test import TestCase
-from django.test.utils import override_settings
+from django.test import TestCase, override_settings
 from django.utils.encoding import python_2_unicode_compatible, force_text
 
 from ..models import Article
@@ -1093,18 +1093,22 @@ class WidgetTests(TestCase):
         class SplitDateForm(Form):
             field = DateTimeField(widget=SplitDateTimeWidget, required=False)
 
-        form = SplitDateForm({'field': ''})
-        self.assertTrue(form.is_valid())
-        form = SplitDateForm({'field': ['', '']})
-        self.assertTrue(form.is_valid())
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=PendingDeprecationWarning)
+            form = SplitDateForm({'field': ''})
+            self.assertTrue(form.is_valid())
+            form = SplitDateForm({'field': ['', '']})
+            self.assertTrue(form.is_valid())
 
         class SplitDateRequiredForm(Form):
             field = DateTimeField(widget=SplitDateTimeWidget, required=True)
 
-        form = SplitDateRequiredForm({'field': ''})
-        self.assertFalse(form.is_valid())
-        form = SplitDateRequiredForm({'field': ['', '']})
-        self.assertFalse(form.is_valid())
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=PendingDeprecationWarning)
+            form = SplitDateRequiredForm({'field': ''})
+            self.assertFalse(form.is_valid())
+            form = SplitDateRequiredForm({'field': ['', '']})
+            self.assertFalse(form.is_valid())
 
 
 class LiveWidgetTests(AdminSeleniumWebDriverTestCase):

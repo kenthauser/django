@@ -26,9 +26,9 @@
 # installed, because pkg_resources is necessary to read eggs.
 
 from django.core.exceptions import ImproperlyConfigured
-from django.template.base import Origin, Template, Context, TemplateDoesNotExist, add_to_builtins
+from django.template.base import Origin, Template, Context, TemplateDoesNotExist
 from django.conf import settings
-from django.utils.module_loading import import_by_path
+from django.utils.module_loading import import_string
 from django.utils import six
 
 template_source_loaders = None
@@ -95,7 +95,7 @@ def find_template_loader(loader):
     else:
         args = []
     if isinstance(loader, six.string_types):
-        TemplateLoader = import_by_path(loader)
+        TemplateLoader = import_string(loader)
 
         if hasattr(TemplateLoader, 'load_template_source'):
             func = TemplateLoader(*args)
@@ -191,5 +191,3 @@ def select_template(template_name_list, dirs=None):
             continue
     # If we get here, none of the templates could be loaded
     raise TemplateDoesNotExist(', '.join(not_found))
-
-add_to_builtins('django.template.loader_tags')

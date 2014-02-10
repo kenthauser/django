@@ -11,8 +11,7 @@ from threading import local
 from django.conf import settings
 from django.template import Template, Context
 from django.template.base import TemplateSyntaxError
-from django.test import TestCase, RequestFactory
-from django.test.utils import override_settings, TransRealMixin
+from django.test import TestCase, RequestFactory, override_settings
 from django.utils import translation
 from django.utils.formats import (get_format, date_format, time_format,
     localize, localize_input, iter_format_modules, get_format_modules,
@@ -31,7 +30,8 @@ from django.utils.translation import (activate, deactivate,
     ungettext_lazy,
     pgettext,
     npgettext, npgettext_lazy,
-    check_for_language)
+    check_for_language,
+    string_concat)
 
 from .forms import I18nForm, SelectDateForm, SelectDateWidget, CompanyForm
 from .models import Company, TestModel
@@ -43,17 +43,19 @@ extended_locale_paths = settings.LOCALE_PATHS + (
 )
 
 
-class TranslationTests(TransRealMixin, TestCase):
+class TranslationTests(TestCase):
 
     def test_override(self):
         activate('de')
-        with translation.override('pl'):
-            self.assertEqual(get_language(), 'pl')
-        self.assertEqual(get_language(), 'de')
-        with translation.override(None):
-            self.assertEqual(get_language(), settings.LANGUAGE_CODE)
-        self.assertEqual(get_language(), 'de')
-        deactivate()
+        try:
+            with translation.override('pl'):
+                self.assertEqual(get_language(), 'pl')
+            self.assertEqual(get_language(), 'de')
+            with translation.override(None):
+                self.assertEqual(get_language(), settings.LANGUAGE_CODE)
+            self.assertEqual(get_language(), 'de')
+        finally:
+            deactivate()
 
     def test_lazy_objects(self):
         """
@@ -265,8 +267,7 @@ class TranslationTests(TransRealMixin, TestCase):
         """
         six.text_type(string_concat(...)) should not raise a TypeError - #4796
         """
-        import django.utils.translation
-        self.assertEqual('django', six.text_type(django.utils.translation.string_concat("dja", "ngo")))
+        self.assertEqual('django', six.text_type(string_concat("dja", "ngo")))
 
     def test_safe_status(self):
         """
@@ -335,7 +336,6 @@ class TranslationTests(TransRealMixin, TestCase):
 
 
 class TranslationThreadSafetyTests(TestCase):
-    """Specifically not using TransRealMixin here to test threading."""
 
     def setUp(self):
         self._old_language = get_language()
@@ -367,7 +367,7 @@ class TranslationThreadSafetyTests(TestCase):
 
 
 @override_settings(USE_L10N=True)
-class FormattingTests(TransRealMixin, TestCase):
+class FormattingTests(TestCase):
 
     def setUp(self):
         super(FormattingTests, self).setUp()
@@ -806,7 +806,7 @@ class FormattingTests(TransRealMixin, TestCase):
             )
 
 
-class MiscTests(TransRealMixin, TestCase):
+class MiscTests(TestCase):
 
     def setUp(self):
         super(MiscTests, self).setUp()
@@ -1019,7 +1019,7 @@ class MiscTests(TransRealMixin, TestCase):
             self.assertNotEqual('pt-br', g(r))
 
 
-class ResolutionOrderI18NTests(TransRealMixin, TestCase):
+class ResolutionOrderI18NTests(TestCase):
 
     def setUp(self):
         super(ResolutionOrderI18NTests, self).setUp()
@@ -1035,11 +1035,27 @@ class ResolutionOrderI18NTests(TransRealMixin, TestCase):
             "translation of '%s'; the actual result is '%s'." % (msgstr, msgid, result)))
 
 
-@override_settings(INSTALLED_APPS=['i18n.resolution'] + list(settings.INSTALLED_APPS))
 class AppResolutionOrderI18NTests(ResolutionOrderI18NTests):
 
+    @override_settings(LANGUAGE_CODE='de')
     def test_app_translation(self):
-        self.assertUgettext('Date/time', 'APP')
+        # Original translation.
+        self.assertUgettext('Date/time', 'Datum/Zeit')
+
+        # Different translation.
+        with self.modify_settings(INSTALLED_APPS={'append': 'i18n.resolution'}):
+            # Force refreshing translations.
+            activate('de')
+
+            # Doesn't work because it's added later in the list.
+            self.assertUgettext('Date/time', 'Datum/Zeit')
+
+            with self.modify_settings(INSTALLED_APPS={'remove': 'django.contrib.admin.apps.SimpleAdminConfig'}):
+                # Force refreshing translations.
+                activate('de')
+
+                # Unless the original is removed from the list.
+                self.assertUgettext('Date/time', 'Datum/Zeit (APP)')
 
 
 @override_settings(LOCALE_PATHS=extended_locale_paths)
@@ -1049,8 +1065,7 @@ class LocalePathsResolutionOrderI18NTests(ResolutionOrderI18NTests):
         self.assertUgettext('Time', 'LOCALE_PATHS')
 
     def test_locale_paths_override_app_translation(self):
-        extended_apps = list(settings.INSTALLED_APPS) + ['i18n.resolution']
-        with self.settings(INSTALLED_APPS=extended_apps):
+        with self.settings(INSTALLED_APPS=['i18n.resolution']):
             self.assertUgettext('Time', 'LOCALE_PATHS')
 
 
@@ -1095,7 +1110,7 @@ class TestLanguageInfo(TestCase):
         six.assertRaisesRegex(self, KeyError, r"Unknown language code xx-xx and xx\.", get_language_info, 'xx-xx')
 
 
-class MultipleLocaleActivationTests(TransRealMixin, TestCase):
+class MultipleLocaleActivationTests(TestCase):
     """
     Tests for template rendering behavior when multiple locales are activated
     during the lifetime of the same process.
@@ -1229,7 +1244,7 @@ class MultipleLocaleActivationTests(TransRealMixin, TestCase):
         'django.middleware.common.CommonMiddleware',
     ),
 )
-class LocaleMiddlewareTests(TransRealMixin, TestCase):
+class LocaleMiddlewareTests(TestCase):
 
     urls = 'i18n.urls'
 
@@ -1267,7 +1282,7 @@ class LocaleMiddlewareTests(TransRealMixin, TestCase):
         'django.middleware.common.CommonMiddleware',
     ),
 )
-class CountrySpecificLanguageTests(TransRealMixin, TestCase):
+class CountrySpecificLanguageTests(TestCase):
 
     urls = 'i18n.urls'
 

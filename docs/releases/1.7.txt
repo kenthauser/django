@@ -7,7 +7,7 @@ Welcome to Django 1.7!
 These release notes cover the `new features`_, as well as some `backwards
 incompatible changes`_ you'll want to be aware of when upgrading from Django
 1.6 or older versions. We've also dropped some features, which are detailed in
-:doc:`our deprecation plan </internals/deprecation>`, and we've `begun the
+:ref:`our deprecation plan <deprecation-removed-in-1.7>`, and we've `begun the
 deprecation process for some features`_.
 
 .. _`new features`: `What's new in Django 1.7`_
@@ -47,16 +47,58 @@ but a few of the key features are:
 * A new ``makemigrations`` command provides an easy way to autodetect changes
   to your models and make migrations for them.
 
-* :data:`~django.db.models.signals.pre_syncdb` and
-  :data:`~django.db.models.signals.post_syncdb` have been renamed to
+  :data:`~django.db.models.signals.pre_syncdb` and
+  :data:`~django.db.models.signals.post_syncdb` have been replaced by
   :data:`~django.db.models.signals.pre_migrate` and
-  :data:`~django.db.models.signals.post_migrate` respectively. The
-  ``create_models``/``created_models`` argument has also been deprecated.
+  :data:`~django.db.models.signals.post_migrate` respectively. These new
+  signals have slightly different arguments. Check the documentation for
+  details.
 
 * The ``allow_syncdb`` method on database routers is now called ``allow_migrate``,
   but still performs the same function. Routers with ``allow_syncdb`` methods
   will still work, but that method name is deprecated and you should change
   it as soon as possible (nothing more than renaming is required).
+
+* ``initial_data`` fixtures are no longer loaded for apps with migrations; if
+  you want to load initial data for an app, we suggest you do it in a migration.
+
+App-loading refactor
+~~~~~~~~~~~~~~~~~~~~
+
+Historically, Django applications were tightly linked to models. A singleton
+known as the "app cache" dealt with both installed applications and models.
+The models module was used as an identifier for applications in many APIs.
+
+As the concept of :doc:`Django applications </ref/applications>` matured, this
+code showed some shortcomings. It has been refactored into an "app registry"
+where models modules no longer have a central role and where it's possible to
+attach configuration data to applications.
+
+Improvements thus far include:
+
+* Applications can run code at startup, before Django does anything else, with
+  the :meth:`~django.apps.AppConfig.ready` method of their configuration.
+
+* Application labels are assigned correctly to models even when they're
+  defined outside of ``models.py``. You don't have to set
+  :attr:`~django.db.models.Options.app_label` explicitly any more.
+
+* It is possible to omit ``models.py`` entirely if an application doesn't
+  have any models.
+
+* Applications can be relabeled with the :attr:`~django.apps.AppConfig.label`
+  attribute of application configurations, to work around label conflicts.
+
+* The name of applications can be customized in the admin with the
+  :attr:`~django.apps.AppConfig.verbose_name` of application configurations.
+
+* The admin automatically calls :func:`~django.contrib.admin.autodiscover()`
+  when Django starts. You can consequently remove this line from your
+  URLconf.
+
+* Django imports all application configurations and models as soon as it
+  starts, through a deterministic and straightforward process. This should
+  make it easier to diagnose import issues such as import loops.
 
 New method on Field subclasses
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -88,15 +130,57 @@ to call the method on the superclass and simply add or remove extra arguments.
 Calling custom ``QuerySet`` methods from the ``Manager``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
+Historically, the recommended way to make reusable model queries was to create
+methods on a custom ``Manager`` class. The problem with this approach was that
+after the first method call, you'd get back a ``QuerySet`` instance and
+couldn't call additional custom manager methods.
+
+Though not documented, it was common to work around this issue by creating a
+custom ``QuerySet`` so that custom methods could be chained; but the solution
+had a number of drawbacks:
+
+* The custom ``QuerySet`` and its custom methods were lost after the first
+  call to ``values()`` or ``values_list()``.
+
+* Writing a custom ``Manager`` was still necessary to return the custom
+  ``QuerySet`` class and all methods that were desired on the ``Manager``
+  had to be proxied to the ``QuerySet``. The whole process went against
+  the DRY principle.
+
 The :meth:`QuerySet.as_manager() <django.db.models.query.QuerySet.as_manager>`
-class method has been added to :ref:`create Manager with QuerySet methods
-<create-manager-with-queryset-methods>`.
+class method can now directly :ref:`create Manager with QuerySet methods
+<create-manager-with-queryset-methods>`::
+
+    class FoodQuerySet(models.QuerySet):
+        def pizzas(self):
+            return self.filter(kind='pizza')
+
+        def vegetarian(self):
+            return self.filter(vegetarian=True)
+
+    class Food(models.Model):
+        kind = models.CharField(max_length=50)
+        vegetarian = models.BooleanField()
+        objects = FoodQuerySet.as_manager()
+
+    Food.objects.pizzas().vegetarian()
 
 Using a custom manager when traversing reverse relations
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 It is now possible to :ref:`specify a custom manager
 <using-custom-reverse-manager>` when traversing a reverse relationship.
+
+New system check framework
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+We've added a new :doc:`System check framework </ref/checks>` for
+detecting common problems (like invalid models) and providing hints for
+resolving those problems. The framework is extensible so you can add your
+own checks for your own apps and libraries.
+
+To perform system checks, you use the :djadmin:`check` management command.
+This command replaces the older :djadmin:`validate` management command.
 
 New ``Prefetch`` object for advanced ``prefetch_related`` operations.
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -144,6 +228,27 @@ for the following, instead of backend specific behavior.
         c.execute(...)
     finally:
         c.close()
+
+Custom lookups
+~~~~~~~~~~~~~~
+
+It is now possible to write custom lookups and transforms for the ORM.
+Custom lookups work just like Django's inbuilt lookups (e.g. ``lte``,
+``icontains``) while transforms are a new concept.
+
+The :class:`django.db.models.Lookup` class provides a way to add lookup
+operators for model fields. As an example it is possible to add ``day_lte``
+operator for ``DateFields``.
+
+The :class:`django.db.models.Transform` class allows transformations of
+database values prior to the final lookup. For example it is possible to
+write a ``year`` transform that extracts year from the field's value.
+Transforms allow for chaining. After the ``year`` transform has been added
+to ``DateField`` it is possible to filter on the transformed value, for
+example ``qs.filter(author__birthdate__year__lte=1981)``.
+
+For more information about both custom lookups and transforms refer to
+:doc:`custom lookups </ref/models/custom-lookups>` documentation.
 
 Minor features
 ~~~~~~~~~~~~~~
@@ -205,11 +310,22 @@ Minor features
   ``html_email_template_name`` parameter used to send a multipart HTML email
   for password resets.
 
+:mod:`django.contrib.formtools`
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+* Calls to :meth:`WizardView.done()
+  <django.contrib.formtools.wizard.views.WizardView.done>` now include a
+  ``form_dict`` to allow easier access to forms by their step name.
+
 :mod:`django.contrib.gis`
 ^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 * The default OpenLayers library version included in widgets has been updated
   from 2.11 to 2.13.
+
+* Prepared geometries now also support the ``crosses``, ``disjoint``,
+  ``overlaps``, ``touches`` and ``within`` predicates, if GEOS 3.3 or later is
+  installed.
 
 :mod:`django.contrib.messages`
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -252,6 +368,12 @@ Minor features
   :class:`~django.middleware.http.ConditionalGetMiddleware` to handle
   conditional ``GET`` requests for sitemaps which set ``lastmod``.
 
+:mod:`django.contrib.sites`
+^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+* The new :class:`django.contrib.site.middleware.CurrentSiteMiddleware` allows
+  setting the current site on each request.
+
 :mod:`django.contrib.staticfiles`
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
@@ -261,6 +383,23 @@ Minor features
   :attr:`~django.core.files.storage.FileSystemStorage.file_permissions_mode`
   and :attr:`~django.core.files.storage.FileSystemStorage.directory_permissions_mode`
   parameters. See :djadmin:`collectstatic` for example usage.
+
+* The :class:`~django.contrib.staticfiles.storage.CachedStaticFilesStorage`
+  backend gets a sibling class called
+  :class:`~django.contrib.staticfiles.storage.ManifestStaticFilesStorage`
+  that doesn't use the cache system at all but instead a JSON file called
+  ``staticfiles.json`` for storing the mapping between the original file name
+  (e.g. ``css/styles.css``) and the hashed file name (e.g.
+  ``css/styles.55e7cbb9ba48.css``. The ``staticfiles.json`` file is created
+  when running the :djadmin:`collectstatic` management command and should
+  be a less expensive alternative for remote storages such as Amazon S3.
+
+  See the :class:`~django.contrib.staticfiles.storage.ManifestStaticFilesStorage`
+  docs for more information.
+
+* :djadmin:`findstatic` now accepts verbosity flag level 2, meaning it will
+  show the relative paths of the directories it searched. See
+  :djadmin:`findstatic` for example output.
 
 :mod:`django.contrib.syndication`
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -289,6 +428,14 @@ Email
   parameter for sending a multipart ``text/plain`` and ``text/html`` email.
 * The SMTP :class:`~django.core.mail.backends.smtp.EmailBackend` now accepts a
   :attr:`~django.core.mail.backends.smtp.EmailBackend.timeout` parameter.
+
+File Storage
+^^^^^^^^^^^^
+
+* File locking on Windows previously depended on the PyWin32 package; if it
+  wasn't installed, file locking failed silently. That dependency has been
+  removed, and file locking is now implemented natively on both Windows
+  and Unix.
 
 File Uploads
 ^^^^^^^^^^^^
@@ -359,6 +506,14 @@ Forms
   that maps fields to their original errors, complete with all metadata
   (error code and params), the latter returns the errors serialized as json.
 
+* It's now possible to customize the error messages for ``ModelForm``’s
+  ``unique``, ``unique_for_date``, and ``unique_together`` constraints.
+  In order to support ``unique_together`` or any other ``NON_FIELD_ERROR``,
+  ``ModelForm`` now looks for the ``NON_FIELD_ERROR`` key in the
+  ``error_messages`` dictionary of the ``ModelForm``’s inner ``Meta`` class.
+  See :ref:`considerations regarding model's error_messages
+  <considerations-regarding-model-errormessages>` for more details.
+
 Internationalization
 ^^^^^^^^^^^^^^^^^^^^
 
@@ -421,6 +576,9 @@ Management Commands
 * Management commands can now produce syntax colored output under Windows if
   the ANSICON third-party tool is installed and active.
 
+* :djadmin:`collectstatic` command with symlink option is now supported on
+  Windows NT 6 (Windows Vista and newer).
+
 Models
 ^^^^^^
 
@@ -430,9 +588,6 @@ Models
 * The new :attr:`~django.db.models.Options.default_permissions` model
   ``Meta`` option allows you to customize (or disable) creation of the default
   add, change, and delete permissions.
-
-* :attr:`~django.db.models.Options.app_label` is no longer required for models
-  that are defined in a ``models`` package within an app.
 
 * Explicit :class:`~django.db.models.OneToOneField` for
   :ref:`multi-table-inheritance` are now discovered in abstract classes.
@@ -543,6 +698,22 @@ Tests
 * :meth:`~django.test.TransactionTestCase.assertNumQueries` now prints
   out the list of executed queries if the assertion fails.
 
+* The ``WSGIRequest`` instance generated by the test handler is now attached to
+  the :attr:`django.test.Response.wsgi_request` attribute.
+
+Validators
+^^^^^^^^^^
+
+* :class:`~django.core.validators.RegexValidator` now accepts an optional
+  Boolean :attr:`~django.core.validators.RegexValidator.inverse_match` argument
+  which determines if the :exc:`~django.core.exceptions.ValidationError` should
+  be raised when the regular expression pattern matches (``True``) or does not
+  match (``False``, by default) the provided ``value``.
+
+* :class:`~django.core.validators.URLValidator` now accepts an optional
+  ``schemes`` argument which allows customization of the accepted URI schemes
+  (instead of the defaults ``http(s)`` and ``ftp(s)``).
+
 Backwards incompatible changes in 1.7
 =====================================
 
@@ -566,6 +737,141 @@ For apps with migrations, ``allow_migrate`` will now get passed
 without custom attributes, methods or managers. Make sure your ``allow_migrate``
 methods are only referring to fields or other items in ``model._meta``.
 
+initial_data
+~~~~~~~~~~~~
+
+Apps with migrations will not load ``initial_data`` fixtures when they have
+finished migrating. Apps without migrations will continue to load these fixtures
+during the phase of ``migrate`` which emulates the old ``syncdb`` behaviour,
+but any new apps will not have this support.
+
+Instead, you are encouraged to load initial data in migrations if you need it
+(using the ``RunPython`` operation and your model classes);
+this has the added advantage that your initial data will not need updating
+every time you change the schema.
+
+App-loading changes
+~~~~~~~~~~~~~~~~~~~
+
+Start-up sequence
+^^^^^^^^^^^^^^^^^
+
+Django 1.7 loads application configurations and models as soon as it starts.
+While this behavior is more straightforward and is believed to be more robust,
+regressions cannot be ruled out. You may encounter the following exceptions:
+
+* ``RuntimeError: App registry isn't ready yet.`` This happens when importing
+  an application configuration or a models module triggers code that depends
+  on the app registry.
+
+  For example, :func:`~django.utils.translation.ugettext()` uses the app
+  registry to look up translation catalogs in applications. To translate at
+  import time, you need :func:`~django.utils.translation.ugettext_lazy()`
+  instead. (Using :func:`~django.utils.translation.ugettext()` would be a bug,
+  because the translation would happen at import time, rather than at each
+  request depending on the active language.)
+
+  Executing database queries with the ORM at import time in models modules
+  will also trigger this exception. The ORM cannot function properly until all
+  models are available.
+
+* ``ImportError: cannot import name ...`` This happens if the import sequence
+  ends up in a loop.
+
+  To eliminate such problems, you should minimize dependencies between your
+  models modules and do as little work as possible at import time. To avoid
+  executing code at import time, you can move it into a function and cache its
+  results. The code will be executed when you first need its results. This
+  concept is known as "lazy evaluation".
+
+* ``django.contrib.admin`` will now automatically perform autodiscovery of
+  ``admin`` modules in installed applications. To prevent it, change your
+  :setting:`INSTALLED_APPS` to contain
+  ``'django.contrib.admin.apps.SimpleAdminConfig'`` instead of
+  ``'django.contrib.admin'``.
+
+Standalone scripts
+^^^^^^^^^^^^^^^^^^
+
+If you're using Django in a plain Python script — rather than a management
+command — and you rely on the :envvar:`DJANGO_SETTINGS_MODULE` environment
+variable, you must now explicitly initialize Django at the beginning of your
+script with::
+
+    >>> import django
+    >>> django.setup()
+
+Otherwise, you will hit ``RuntimeError: App registry isn't ready yet.``
+
+App registry consistency
+^^^^^^^^^^^^^^^^^^^^^^^^
+
+It is no longer possible to have multiple installed applications with the same
+label. In previous versions of Django, this didn't always work correctly, but
+didn't crash outright either.
+
+If you have two apps with the same label, you should create an
+:class:`~django.apps.AppConfig` for one of them and override its
+:class:`~django.apps.AppConfig.label` there. You should then adjust your code
+wherever it references this application or its models with the old label.
+
+It isn't possible to import the same model twice through different paths any
+more. As of Django 1.6, this may happen only if you're manually putting a
+directory and a subdirectory on :envvar:`PYTHONPATH`. Refer to the section on
+the new project layout in the :doc:`1.4 release notes </releases/1.4>` for
+migration instructions.
+
+You should make sure that:
+
+* All models are defined in applications that are listed in
+  :setting:`INSTALLED_APPS` or have an explicit
+  :attr:`~django.db.models.Options.app_label`.
+
+* Models aren't imported as a side-effect of loading their application.
+  Specifically, you shouldn't import models in the root module of an
+  application nor in the module that define its configuration class.
+
+Django will enforce these requirements as of version 1.9, after a deprecation
+period.
+
+Subclassing AppCommand
+^^^^^^^^^^^^^^^^^^^^^^
+
+Subclasses of :class:`~django.core.management.AppCommand` must now implement a
+:meth:`~django.core.management.AppCommand.handle_app_config` method instead of
+``handle_app()``. This method receives an :class:`~django.apps.AppConfig`
+instance instead of a models module.
+
+Introspecting applications
+^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Since :setting:`INSTALLED_APPS` now supports application configuration classes
+in addition to application modules, you should review code that accesses this
+setting directly and use the app registry (:attr:`django.apps.apps`) instead.
+
+The app registry has preserved some features of the old app cache. Even though
+the app cache was a private API, obsolete methods and arguments will be
+removed through a standard deprecation path, with the exception of the
+following changes that take effect immediately:
+
+* ``get_model`` raises :exc:`~exceptions.LookupError` instead of returning
+  ``None`` when no model is found.
+
+* The ``only_installed`` argument of ``get_model`` and ``get_models`` no
+  longer exists, nor does the ``seed_cache`` argument of ``get_model``.
+
+Management commands and order of :setting:`INSTALLED_APPS`
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+When several applications provide management commands with the same name,
+Django loads the command from the application that comes first in
+:setting:`INSTALLED_APPS`. Previous versions loaded the command from the
+application that came last.
+
+This brings discovery of management commands in line with other parts of
+Django that rely on the order of :setting:`INSTALLED_APPS`, such as static
+files, templates, and translations.
+
 Behavior of ``LocMemCache`` regarding pickle errors
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -577,6 +883,19 @@ cache-specific errors. This has been fixed in Django 1.7, see
 `Ticket #21200`_ for more details.
 
 .. _Ticket #21200: https://code.djangoproject.com/ticket/21200
+
+Cache keys are now generated from the request's absolute URL
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Previous versions of Django generated cache keys using a request's path and
+query string but not the scheme or host. If a Django application was serving
+multiple subdomains or domains, cache keys could collide. In Django 1.7, cache
+keys vary by the absolute URL of the request including scheme, host, path, and
+query string. For example, the URL portion of a cache key is now generated from
+``http://www.example.com/path/to/?key=val`` rather than ``/path/to/?key=val``.
+The cache keys generated by Django 1.7 will be different from the keys
+generated by older versions of Django. After upgrading to Django 1.7, the first
+request to any previously cached URL will be a cache miss .
 
 Passing ``None`` to ``Manager.db_manager()``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -599,6 +918,8 @@ If your project handles datetimes before 1970 or after 2037 and Django raises
 a :exc:`~exceptions.ValueError` when encountering them, you will have to
 install pytz_. You may be affected by this problem if you use Django's time
 zone-related date formats or :mod:`django.contrib.syndication`.
+
+.. _pytz: https://pypi.python.org/pypi/pytz/
 
 ``remove()`` and ``clear()`` methods of related managers
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -628,7 +949,19 @@ Fixing the issues introduced some backward incompatible changes:
   may not be an issue depending on your database and your data itself.
   See :ref:`this note <nested-queries-performance>` for more details.
 
-.. _pytz: https://pypi.python.org/pypi/pytz/
+Admin login redirection strategy
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Historically, the Django admin site passed the request from an unauthorized or
+unauthenticated user directly to the login view, without HTTP redirection. In
+Django 1.7, this behavior changed to conform to a more traditional workflow
+where any unauthorized request to an admin page will be redirected (by HTTP
+status code 302) to the login page, with the ``next`` parameter set to the
+referring path. The user will be redirected there after a successful login.
+
+Note also that the admin login form has been updated to not contain the
+``this_is_the_login_form`` field (now unused) and the ``ValidationError`` code
+has been set to the more regular ``invalid_login`` key.
 
 Miscellaneous
 ~~~~~~~~~~~~~
@@ -638,7 +971,7 @@ Miscellaneous
   have a custom :class:`~django.core.files.uploadhandler.FileUploadHandler`
   that implements ``new_file()``, be sure it accepts this new parameter.
 
-* :class:`ModelFormSet<django.forms.models.BaseModelFormSet>`’s no longer
+* :class:`ModelFormSet<django.forms.models.BaseModelFormSet>`\s no longer
   delete instances when ``save(commit=False)`` is called. See
   :attr:`~django.forms.formsets.BaseFormSet.can_delete` for instructions on how
   to manually delete objects from deleted forms.
@@ -722,6 +1055,27 @@ Miscellaneous
   ``select_related('foo').select_related('bar')``. Previously the latter would
   have been equivalent to ``select_related('bar')``.
 
+* GeoDjango dropped support for GEOS < 3.1.
+
+* The ``init_connection_state`` method of database backends now executes in
+  autocommit mode (unless you set :setting:`AUTOCOMMIT <DATABASE-AUTOCOMMIT>`
+  to ``False``). If you maintain a custom database backend, you should check
+  that method.
+
+* The ``django.db.backends.BaseDatabaseFeatures.allows_primary_key_0``
+  attribute has been renamed to ``allows_auto_pk_0`` to better describe it.
+  It's ``True`` for all database backends included with Django except MySQL
+  which does allow primary keys with value 0. It only forbids *autoincrement*
+  primary keys with value 0.
+
+* Shadowing model fields defined in a parent model has been forbidden as this
+  creates amiguity in the expected model behavior. In addition, any clashing
+  fields in the model inheritance hierarchy results in a system check error.
+  For example, if you use multi-inheritance, you need to define custom primary
+  key fields on parent models, otherwise the default ``id`` fields will clash.
+
+.. _deprecated-features-1.7:
+
 Features deprecated in 1.7
 ==========================
 
@@ -737,6 +1091,17 @@ Features deprecated in 1.7
 ``django.utils.dictconfig`` and ``django.utils.importlib`` were copies of
 respectively :mod:`logging.config` and :mod:`importlib` provided for Python
 versions prior to 2.7. They have been deprecated.
+
+``django.utils.module_loading.import_by_path``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The current :meth:`~django.utils.module_loading.import_by_path` function
+catches ``AttributeError``, ``ImportError`` and ``ValueError`` exceptions,
+and re-raises :exc:`~django.core.exceptions.ImproperlyConfigured`. Such
+exception masking makes it needlessly hard to diagnose circular import
+problems, because it makes it look like the problem comes from inside Django.
+It has been deprecated in favor of
+:meth:`~django.utils.module_loading.import_string`.
 
 ``django.utils.tzinfo``
 ~~~~~~~~~~~~~~~~~~~~~~~
@@ -772,6 +1137,19 @@ than simply ``myapp/models.py``, Django would look for :ref:`initial SQL data
 will search ``myapp/sql/`` as documented. The old location will continue to
 work until Django 1.9.
 
+Reorganization of ``django.contrib.sites``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``django.contrib.sites`` provides reduced functionality when it isn't in
+:setting:`INSTALLED_APPS`. The app-loading refactor adds some constraints in
+that situation. As a consequence, two objects were moved, and the old
+locations are deprecated:
+
+* :class:`~django.contrib.sites.requests.RequestSite` now lives in
+  ``django.contrib.sites.requests``.
+* :func:`~django.contrib.sites.shortcuts.get_current_site` now lives in
+  ``django.contrib.sites.shortcuts``.
+
 ``declared_fieldsets`` attribute on ``ModelAdmin``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -780,10 +1158,29 @@ API, it will go through a regular deprecation path. This attribute was mostly
 used by methods that bypassed ``ModelAdmin.get_fieldsets()`` but this was
 considered a bug and has been addressed.
 
+Reorganization of ``django.contrib.contenttypes``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Since ``django.contrib.contenttypes.generic`` defined both admin and model
+related objects an import of this module could trigger unexpected side effects.
+As a consequence, its contents were split into :mod:`~django.contrib.contenttypes`
+submodules and the ``django.contrib.contenttypes.generic`` module is deprecated:
+
+* :class:`~django.contrib.contenttypes.fields.GenericForeignKey` and
+  :class:`~django.contrib.contenttypes.fields.GenericRelation` now live in
+  :mod:`~django.contrib.contenttypes.fields`.
+* :class:`~django.contrib.contenttypes.forms.BaseGenericInlineFormSet` and
+  :func:`~django.contrib.contenttypes.forms.generic_inlineformset_factory` now
+  live in :mod:`~django.contrib.contenttypes.forms`.
+* :class:`~django.contrib.contenttypes.admin.GenericInlineModelAdmin`,
+  :class:`~django.contrib.contenttypes.admin.GenericStackedInline` and
+  :class:`~django.contrib.contenttypes.admin.GenericTabularInline` now live in
+  :mod:`~django.contrib.contenttypes.admin`.
+
 ``syncdb``
 ~~~~~~~~~~
 
-The ``syncdb`` command has been deprecated in favour of the new ``migrate``
+The :djadmin:`syncdb` command has been deprecated in favor of the new :djadmin:`migrate`
 command. ``migrate`` takes the same arguments as ``syncdb`` used to plus a few
 more, so it's safe to just change the name you're calling and nothing else.
 
@@ -886,3 +1283,39 @@ the arguments may have been evaluated at query time.
 
 The ``ADMIN_FOR`` feature, part of the admindocs, has been removed. You can
 remove the setting from your configuration at your convenience.
+
+``SplitDateTimeWidget`` with ``DateTimeField``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``SplitDateTimeWidget`` support in :class:`~django.forms.DateTimeField` is
+deprecated, use ``SplitDateTimeWidget`` with
+:class:`~django.forms.SplitDateTimeField` instead.
+
+``validate``
+~~~~~~~~~~~~
+
+:djadmin:`validate` command is deprecated in favor of :djadmin:`check` command.
+
+``django.core.management.BaseCommand``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``requires_model_validation`` is deprecated in favor of a new
+``requires_system_checks`` flag. If the latter flag is missing, then the
+value of the former flag is used. Defining both ``requires_system_checks`` and
+``requires_model_validation`` results in an error.
+
+The ``check()`` method has replaced the old ``validate()`` method.
+
+``ModelAdmin.validator``
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+``ModelAdmin.validator`` is deprecated in favor of new ``checks`` attribute.
+
+``django.db.backends.DatabaseValidation.validate_field``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+This method is deprecated in favor of a new ``check_field`` method.
+The functionality required by ``check_field()`` is the same as that provided
+by ``validate_field()``, but the output format is different. Third-party database
+backends needing this functionality should modify their backends to provide an
+implementation of ``check_field()``.

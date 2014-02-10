@@ -1,4 +1,4 @@
-from django.core.apps.cache import AppCache
+from django.apps.registry import Apps
 from django.db import models
 from django.db.migrations.state import ProjectState, ModelState, InvalidBasesError
 from django.test import TestCase
@@ -11,10 +11,10 @@ class StateTests(TestCase):
 
     def test_create(self):
         """
-        Tests making a ProjectState from an AppCache
+        Tests making a ProjectState from an Apps
         """
 
-        new_app_cache = AppCache()
+        new_apps = Apps(["migrations"])
 
         class Author(models.Model):
             name = models.CharField(max_length=255)
@@ -23,15 +23,22 @@ class StateTests(TestCase):
 
             class Meta:
                 app_label = "migrations"
-                app_cache = new_app_cache
+                apps = new_apps
                 unique_together = ["name", "bio"]
 
         class AuthorProxy(Author):
             class Meta:
                 app_label = "migrations"
-                app_cache = new_app_cache
+                apps = new_apps
                 proxy = True
                 ordering = ["name"]
+
+        class SubAuthor(Author):
+            width = models.FloatField(null=True)
+
+            class Meta:
+                app_label = "migrations"
+                apps = new_apps
 
         class Book(models.Model):
             title = models.CharField(max_length=1000)
@@ -40,13 +47,14 @@ class StateTests(TestCase):
 
             class Meta:
                 app_label = "migrations"
-                app_cache = new_app_cache
+                apps = new_apps
                 verbose_name = "tome"
                 db_table = "test_tome"
 
-        project_state = ProjectState.from_app_cache(new_app_cache)
+        project_state = ProjectState.from_apps(new_apps)
         author_state = project_state.models['migrations', 'author']
         author_proxy_state = project_state.models['migrations', 'authorproxy']
+        sub_author_state = project_state.models['migrations', 'subauthor']
         book_state = project_state.models['migrations', 'book']
 
         self.assertEqual(author_state.app_label, "migrations")
@@ -55,7 +63,7 @@ class StateTests(TestCase):
         self.assertEqual(author_state.fields[1][1].max_length, 255)
         self.assertEqual(author_state.fields[2][1].null, False)
         self.assertEqual(author_state.fields[3][1].null, True)
-        self.assertEqual(author_state.options, {"unique_together": {("name", "bio")}})
+        self.assertEqual(author_state.options, {"unique_together": set([("name", "bio")])})
         self.assertEqual(author_state.bases, (models.Model, ))
 
         self.assertEqual(book_state.app_label, "migrations")
@@ -73,9 +81,14 @@ class StateTests(TestCase):
         self.assertEqual(author_proxy_state.options, {"proxy": True, "ordering": ["name"]})
         self.assertEqual(author_proxy_state.bases, ("migrations.author", ))
 
+        self.assertEqual(sub_author_state.app_label, "migrations")
+        self.assertEqual(sub_author_state.name, "SubAuthor")
+        self.assertEqual(len(sub_author_state.fields), 2)
+        self.assertEqual(sub_author_state.bases, ("migrations.author", ))
+
     def test_render(self):
         """
-        Tests rendering a ProjectState into an AppCache.
+        Tests rendering a ProjectState into an Apps.
         """
         project_state = ProjectState()
         project_state.add_model_state(ModelState(
@@ -89,10 +102,27 @@ class StateTests(TestCase):
             {},
             None,
         ))
+        project_state.add_model_state(ModelState(
+            "migrations",
+            "SubTag",
+            [
+                ('tag_ptr', models.OneToOneField(
+                    auto_created=True,
+                    primary_key=True,
+                    to_field='id',
+                    serialize=False,
+                    to='migrations.Tag',
+                )),
+                ("awesome", models.BooleanField()),
+            ],
+            options={},
+            bases=("migrations.Tag",),
+        ))
 
-        new_app_cache = project_state.render()
-        self.assertEqual(new_app_cache.get_model("migrations", "Tag")._meta.get_field_by_name("name")[0].max_length, 100)
-        self.assertEqual(new_app_cache.get_model("migrations", "Tag")._meta.get_field_by_name("hidden")[0].null, False)
+        new_apps = project_state.render()
+        self.assertEqual(new_apps.get_model("migrations", "Tag")._meta.get_field_by_name("name")[0].max_length, 100)
+        self.assertEqual(new_apps.get_model("migrations", "Tag")._meta.get_field_by_name("hidden")[0].null, False)
+        self.assertEqual(len(new_apps.get_model("migrations", "SubTag")._meta.local_fields), 2)
 
     def test_render_model_inheritance(self):
         class Book(models.Model):
@@ -100,90 +130,90 @@ class StateTests(TestCase):
 
             class Meta:
                 app_label = "migrations"
-                app_cache = AppCache()
+                apps = Apps()
 
         class Novel(Book):
             class Meta:
                 app_label = "migrations"
-                app_cache = AppCache()
+                apps = Apps()
 
         # First, test rendering individually
-        app_cache = AppCache()
+        apps = Apps(["migrations"])
 
         # We shouldn't be able to render yet
         ms = ModelState.from_model(Novel)
         with self.assertRaises(InvalidBasesError):
-            ms.render(app_cache)
+            ms.render(apps)
 
-        # Once the parent model is in the app cache, it should be fine
-        ModelState.from_model(Book).render(app_cache)
-        ModelState.from_model(Novel).render(app_cache)
+        # Once the parent model is in the app registry, it should be fine
+        ModelState.from_model(Book).render(apps)
+        ModelState.from_model(Novel).render(apps)
 
     def test_render_model_with_multiple_inheritance(self):
         class Foo(models.Model):
             class Meta:
                 app_label = "migrations"
-                app_cache = AppCache()
+                apps = Apps()
 
         class Bar(models.Model):
             class Meta:
                 app_label = "migrations"
-                app_cache = AppCache()
+                apps = Apps()
 
         class FooBar(Foo, Bar):
             class Meta:
                 app_label = "migrations"
-                app_cache = AppCache()
+                apps = Apps()
 
-        app_cache = AppCache()
+        apps = Apps(["migrations"])
 
         # We shouldn't be able to render yet
         ms = ModelState.from_model(FooBar)
         with self.assertRaises(InvalidBasesError):
-            ms.render(app_cache)
+            ms.render(apps)
 
-        # Once the parent models are in the app cache, it should be fine
-        ModelState.from_model(Foo).render(app_cache)
-        ModelState.from_model(Bar).render(app_cache)
-        ModelState.from_model(FooBar).render(app_cache)
+        # Once the parent models are in the app registry, it should be fine
+        ModelState.from_model(Foo).render(apps)
+        ModelState.from_model(Bar).render(apps)
+        ModelState.from_model(FooBar).render(apps)
 
     def test_render_project_dependencies(self):
         """
         Tests that the ProjectState render method correctly renders models
         to account for inter-model base dependencies.
         """
-        new_app_cache = AppCache()
+        new_apps = Apps()
 
         class A(models.Model):
             class Meta:
                 app_label = "migrations"
-                app_cache = new_app_cache
+                apps = new_apps
 
         class B(A):
             class Meta:
                 app_label = "migrations"
-                app_cache = new_app_cache
+                apps = new_apps
 
         class C(B):
             class Meta:
                 app_label = "migrations"
-                app_cache = new_app_cache
+                apps = new_apps
 
         class D(A):
             class Meta:
                 app_label = "migrations"
-                app_cache = new_app_cache
+                apps = new_apps
 
         class E(B):
             class Meta:
                 app_label = "migrations"
-                app_cache = new_app_cache
+                apps = new_apps
                 proxy = True
 
         class F(D):
             class Meta:
                 app_label = "migrations"
-                app_cache = new_app_cache
+                apps = new_apps
                 proxy = True
 
         # Make a ProjectState and render it
@@ -194,8 +224,8 @@ class StateTests(TestCase):
         project_state.add_model_state(ModelState.from_model(D))
         project_state.add_model_state(ModelState.from_model(E))
         project_state.add_model_state(ModelState.from_model(F))
-        final_app_cache = project_state.render()
-        self.assertEqual(len(final_app_cache.get_models()), 6)
+        final_apps = project_state.render()
+        self.assertEqual(len(final_apps.get_models()), 6)
 
         # Now make an invalid ProjectState and make sure it fails
         project_state = ProjectState()

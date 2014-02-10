@@ -4,8 +4,8 @@ XML serializer.
 
 from __future__ import unicode_literals
 
+from django.apps import apps
 from django.conf import settings
-from django.core.apps import app_cache
 from django.core.serializers import base
 from django.db import models, DEFAULT_DB_ALIAS
 from django.utils.xmlutils import SimplerXMLGenerator
@@ -277,14 +277,11 @@ class Deserializer(base.Deserializer):
                 "<%s> node is missing the required '%s' attribute"
                 % (node.nodeName, attr))
         try:
-            Model = app_cache.get_model(*model_identifier.split("."))
-        except TypeError:
-            Model = None
-        if Model is None:
+            return apps.get_model(model_identifier)
+        except (LookupError, TypeError):
             raise base.DeserializationError(
                 "<%s> node has invalid model identifier: '%s'"
                 % (node.nodeName, model_identifier))
-        return Model
 
 
 def getInnerText(node):

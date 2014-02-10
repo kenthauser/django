@@ -8,7 +8,7 @@ from collections import OrderedDict
 import copy
 import warnings
 
-from django.core.exceptions import ValidationError
+from django.core.exceptions import ValidationError, NON_FIELD_ERRORS
 from django.forms.fields import Field, FileField
 from django.forms.utils import flatatt, ErrorDict, ErrorList
 from django.forms.widgets import Media, MediaDefiningClass, TextInput, Textarea
@@ -20,8 +20,6 @@ from django.utils import six
 
 
 __all__ = ('BaseForm', 'Form')
-
-NON_FIELD_ERRORS = '__all__'
 
 
 def pretty_name(name):
@@ -661,7 +659,7 @@ class BoundField(object):
         """
         Wrapper around the field widget's `id_for_label` method.
         Useful, for example, for focusing on this field regardless of whether
-        it has a single widget or a MutiWidget.
+        it has a single widget or a MultiWidget.
         """
         widget = self.field.widget
         id_ = widget.attrs.get('id') or self.auto_id

@@ -2,9 +2,11 @@ import importlib
 import os
 import sys
 
-from django.core.apps import app_cache
-from django.utils import datetime_safe
+from django.apps import apps
+from django.utils import datetime_safe, six
 from django.utils.six.moves import input
+
+from .loader import MIGRATIONS_MODULE_NAME
 
 
 class MigrationQuestioner(object):
@@ -28,16 +30,21 @@ class MigrationQuestioner(object):
         # Apps from the new app template will have these; the python
         # file check will ensure we skip South ones.
         try:
-            app_config = app_cache.get_app_config(app_label)
+            app_config = apps.get_app_config(app_label)
         except LookupError:         # It's a fake app.
             return self.defaults.get("ask_initial", False)
-        migrations_import_path = "%s.migrations" % app_config.name
+        migrations_import_path = "%s.%s" % (app_config.name, MIGRATIONS_MODULE_NAME)
         try:
             migrations_module = importlib.import_module(migrations_import_path)
         except ImportError:
             return self.defaults.get("ask_initial", False)
         else:
-            filenames = os.listdir(os.path.dirname(migrations_module.__file__))
+            if hasattr(migrations_module, "__file__"):
+                filenames = os.listdir(os.path.dirname(migrations_module.__file__))
+            elif hasattr(migrations_module, "__path__"):
+                if len(migrations_module.__path__) > 1:
+                    return False
+                filenames = os.listdir(list(migrations_module.__path__)[0])
             return not any(x.endswith(".py") for x in filenames if x != "__init__.py")
 
     def ask_not_null_addition(self, field_name, model_name):
@@ -95,7 +102,13 @@ class InteractiveMigrationQuestioner(MigrationQuestioner):
             print("Please enter the default value now, as valid Python")
             print("The datetime module is available, so you can do e.g. datetime.date.today()")
             while True:
-                code = input(">>> ")
+                if six.PY3:
+                    # Six does not correctly abstract over the fact that
+                    # py3 input returns a unicode string, while py2 raw_input
+                    # returns a bytestring.
+                    code = input(">>> ")
+                else:
+                    code = input(">>> ").decode(sys.stdin.encoding)
                 if not code:
                     print("Please enter some code, or 'exit' (with no quotes) to exit.")
                 elif code == "exit":

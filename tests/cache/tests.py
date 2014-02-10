@@ -23,8 +23,8 @@ from django.middleware.cache import (FetchFromCacheMiddleware,
     UpdateCacheMiddleware, CacheMiddleware)
 from django.template import Template
 from django.template.response import TemplateResponse
-from django.test import TestCase, TransactionTestCase, RequestFactory
-from django.test.utils import (override_settings, IgnoreDeprecationWarningsMixin,
+from django.test import TestCase, TransactionTestCase, RequestFactory, override_settings
+from django.test.utils import (IgnoreDeprecationWarningsMixin,
     IgnorePendingDeprecationWarningsMixin)
 from django.utils import six
 from django.utils import timezone
@@ -896,10 +896,9 @@ class DBCacheTests(BaseCacheTests, TransactionTestCase):
         management.call_command('createcachetable', verbosity=0, interactive=False)
 
     def drop_table(self):
-        cursor = connection.cursor()
-        table_name = connection.ops.quote_name('test cache table')
-        cursor.execute('DROP TABLE %s' % table_name)
-        cursor.close()
+        with connection.cursor() as cursor:
+            table_name = connection.ops.quote_name('test cache table')
+            cursor.execute('DROP TABLE %s' % table_name)
 
     def test_zero_cull(self):
         self._perform_cull_test(caches['zero_cull'], 50, 18)
@@ -991,6 +990,18 @@ class CreateCacheTableForDBCacheTests(TestCase):
             router.routers = old_routers
 
 
+class PicklingSideEffect(object):
+
+    def __init__(self, cache):
+        self.cache = cache
+        self.locked = False
+
+    def __getstate__(self):
+        if self.cache._lock.active_writers:
+            self.locked = True
+        return {}
+
+
 @override_settings(CACHES=caches_setting_for_tests(
     BACKEND='django.core.cache.backends.locmem.LocMemCache',
 ))
@@ -1025,6 +1036,15 @@ class LocMemCacheTests(BaseCacheTests, TestCase):
         cache.set('value', 42)
         self.assertEqual(caches['default'].get('value'), 42)
         self.assertEqual(caches['other'].get('value'), None)
+
+    def test_locking_on_pickle(self):
+        """#20613/#18541 -- Ensures pickling is done outside of the lock."""
+        bad_obj = PicklingSideEffect(cache)
+        cache.set('set', bad_obj)
+        self.assertFalse(bad_obj.locked, "Cache was locked during pickling")
+
+        cache.add('add', bad_obj)
+        self.assertFalse(bad_obj.locked, "Cache was locked during pickling")
 
     def test_incr_decr_timeout(self):
         """incr/decr does not modify expiry time (matches memcached behavior)"""
@@ -1198,8 +1218,20 @@ class CacheUtils(TestCase):
     """TestCase for django.utils.cache functions."""
 
     def setUp(self):
+        self.host = 'www.example.com'
         self.path = '/cache/test/'
-        self.factory = RequestFactory()
+        self.factory = RequestFactory(HTTP_HOST=self.host)
+
+    def _get_request_cache(self, method='GET', query_string=None, update_cache=None):
+        request = self._get_request(self.host, self.path,
+                                    method, query_string=query_string)
+        request._cache_update_cache = True if not update_cache else update_cache
+        return request
+
+    def _set_cache(self, request, msg):
+        response = HttpResponse()
+        response.content = msg
+        return UpdateCacheMiddleware().process_response(request, response)
 
     def test_patch_vary_headers(self):
         headers = (
@@ -1229,10 +1261,19 @@ class CacheUtils(TestCase):
         self.assertEqual(get_cache_key(request), None)
         # Set headers to an empty list.
         learn_cache_key(request, response)
-        self.assertEqual(get_cache_key(request), 'views.decorators.cache.cache_page.settingsprefix.GET.9fa0fd092afb73bdce204bb4f94d5804.d41d8cd98f00b204e9800998ecf8427e')
+
+        self.assertEqual(
+            get_cache_key(request),
+            'views.decorators.cache.cache_page.settingsprefix.GET.'
+            '18a03f9c9649f7d684af5db3524f5c99.d41d8cd98f00b204e9800998ecf8427e'
+        )
         # Verify that a specified key_prefix is taken into account.
         learn_cache_key(request, response, key_prefix=key_prefix)
-        self.assertEqual(get_cache_key(request, key_prefix=key_prefix), 'views.decorators.cache.cache_page.localprefix.GET.9fa0fd092afb73bdce204bb4f94d5804.d41d8cd98f00b204e9800998ecf8427e')
+        self.assertEqual(
+            get_cache_key(request, key_prefix=key_prefix),
+            'views.decorators.cache.cache_page.localprefix.GET.'
+            '18a03f9c9649f7d684af5db3524f5c99.d41d8cd98f00b204e9800998ecf8427e'
+        )
 
     def test_get_cache_key_with_query(self):
         request = self.factory.get(self.path, {'test': 1})
@@ -1242,7 +1283,22 @@ class CacheUtils(TestCase):
         # Set headers to an empty list.
         learn_cache_key(request, response)
         # Verify that the querystring is taken into account.
-        self.assertEqual(get_cache_key(request), 'views.decorators.cache.cache_page.settingsprefix.GET.d11198ba31883732b0de5786a80cc12b.d41d8cd98f00b204e9800998ecf8427e')
+
+        self.assertEqual(
+            get_cache_key(request),
+            'views.decorators.cache.cache_page.settingsprefix.GET.'
+            'beaf87a9a99ee81c673ea2d67ccbec2a.d41d8cd98f00b204e9800998ecf8427e'
+        )
+
+    def test_cache_key_varies_by_url(self):
+        """
+        get_cache_key keys differ by fully-qualfied URL instead of path
+        """
+        request1 = self.factory.get(self.path, HTTP_HOST='sub-1.example.com')
+        learn_cache_key(request1, HttpResponse())
+        request2 = self.factory.get(self.path, HTTP_HOST='sub-2.example.com')
+        learn_cache_key(request2, HttpResponse())
+        self.assertTrue(get_cache_key(request1) != get_cache_key(request2))
 
     def test_learn_cache_key(self):
         request = self.factory.head(self.path)
@@ -1250,7 +1306,12 @@ class CacheUtils(TestCase):
         response['Vary'] = 'Pony'
         # Make sure that the Vary header is added to the key hash
         learn_cache_key(request, response)
-        self.assertEqual(get_cache_key(request), 'views.decorators.cache.cache_page.settingsprefix.GET.9fa0fd092afb73bdce204bb4f94d5804.d41d8cd98f00b204e9800998ecf8427e')
+
+        self.assertEqual(
+            get_cache_key(request),
+            'views.decorators.cache.cache_page.settingsprefix.GET.'
+            '18a03f9c9649f7d684af5db3524f5c99.d41d8cd98f00b204e9800998ecf8427e'
+        )
 
     def test_patch_cache_control(self):
         tests = (
@@ -1874,10 +1935,19 @@ class TestWithTemplateResponse(TestCase):
         self.assertEqual(get_cache_key(request), None)
         # Set headers to an empty list.
         learn_cache_key(request, response)
-        self.assertEqual(get_cache_key(request), 'views.decorators.cache.cache_page.settingsprefix.GET.9fa0fd092afb73bdce204bb4f94d5804.d41d8cd98f00b204e9800998ecf8427e')
+
+        self.assertEqual(
+            get_cache_key(request),
+            'views.decorators.cache.cache_page.settingsprefix.GET.'
+            '58a0a05c8a5620f813686ff969c26853.d41d8cd98f00b204e9800998ecf8427e'
+        )
         # Verify that a specified key_prefix is taken into account.
         learn_cache_key(request, response, key_prefix=key_prefix)
-        self.assertEqual(get_cache_key(request, key_prefix=key_prefix), 'views.decorators.cache.cache_page.localprefix.GET.9fa0fd092afb73bdce204bb4f94d5804.d41d8cd98f00b204e9800998ecf8427e')
+        self.assertEqual(
+            get_cache_key(request, key_prefix=key_prefix),
+            'views.decorators.cache.cache_page.localprefix.GET.'
+            '58a0a05c8a5620f813686ff969c26853.d41d8cd98f00b204e9800998ecf8427e'
+        )
 
     def test_get_cache_key_with_query(self):
         request = self.factory.get(self.path, {'test': 1})
@@ -1887,7 +1957,11 @@ class TestWithTemplateResponse(TestCase):
         # Set headers to an empty list.
         learn_cache_key(request, response)
         # Verify that the querystring is taken into account.
-        self.assertEqual(get_cache_key(request), 'views.decorators.cache.cache_page.settingsprefix.GET.d11198ba31883732b0de5786a80cc12b.d41d8cd98f00b204e9800998ecf8427e')
+        self.assertEqual(
+            get_cache_key(request),
+            'views.decorators.cache.cache_page.settingsprefix.GET.'
+            '0f1c2d56633c943073c4569d9a9502fe.d41d8cd98f00b204e9800998ecf8427e'
+        )
 
     @override_settings(USE_ETAGS=False)
     def test_without_etag(self):
@@ -1915,12 +1989,12 @@ class TestEtagWithAdmin(TestCase):
     def test_admin(self):
         with self.settings(USE_ETAGS=False):
             response = self.client.get('/test_admin/admin/')
-            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.status_code, 302)
             self.assertFalse(response.has_header('ETag'))
 
         with self.settings(USE_ETAGS=True):
             response = self.client.get('/test_admin/admin/')
-            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.status_code, 302)
             self.assertTrue(response.has_header('ETag'))
 
 

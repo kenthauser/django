@@ -305,6 +305,17 @@ The Django adapter is currently only available in the Dev branch.
 
 .. _release branches: http://dev.mysql.com/downloads/connector/python/
 
+.. _mysql-time-zone-definitions:
+
+Time zone definitions
+---------------------
+
+If you plan on using Django's :doc:`timezone support </topics/i18n/timezones>`,
+use `mysql_tzinfo_to_sql`_ to load time zone tables into the MySQL database.
+This needs to be done just once for your MySQL server, not per database.
+
+.. _mysql_tzinfo_to_sql: http://dev.mysql.com/doc/refman/5.5/en/mysql-tzinfo-to-sql.html
+
 Creating your database
 ----------------------
 
@@ -850,9 +861,9 @@ Using a 3rd-party database backend
 In addition to the officially supported databases, there are backends provided
 by 3rd parties that allow you to use other databases with Django:
 
-* `Sybase SQL Anywhere`_
+* `SAP SQL Anywhere`_
 * `IBM DB2`_
-* `Microsoft SQL Server 2005`_
+* `Microsoft SQL Server`_
 * Firebird_
 * ODBC_
 * ADSDB_
@@ -862,9 +873,9 @@ vary considerably. Queries regarding the specific capabilities of these
 unofficial backends, along with any support queries, should be directed to
 the support channels provided by each 3rd party project.
 
-.. _Sybase SQL Anywhere: http://code.google.com/p/sqlany-django/
+.. _SAP SQL Anywhere: https://github.com/sqlanywhere/sqlany-django
 .. _IBM DB2: http://code.google.com/p/ibm-db/
-.. _Microsoft SQL Server 2005: http://code.google.com/p/django-mssql/
-.. _Firebird: http://code.google.com/p/django-firebird/
+.. _Microsoft SQL Server: http://django-mssql.readthedocs.org/en/latest/
+.. _Firebird: https://github.com/maxirobaina/django-firebird
 .. _ODBC: https://github.com/lionheart/django-pyodbc/
 .. _ADSDB: http://code.google.com/p/adsdb-django/

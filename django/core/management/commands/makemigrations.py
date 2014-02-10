@@ -3,7 +3,7 @@ import os
 import operator
 from optparse import make_option
 
-from django.core.apps import app_cache
+from django.apps import apps
 from django.core.management.base import BaseCommand, CommandError
 from django.db import connections, DEFAULT_DB_ALIAS, migrations
 from django.db.migrations.loader import MigrationLoader
@@ -37,7 +37,7 @@ class Command(BaseCommand):
         bad_app_labels = set()
         for app_label in app_labels:
             try:
-                app_cache.get_app_config(app_label)
+                apps.get_app_config(app_label)
             except LookupError:
                 bad_app_labels.add(app_label)
         if bad_app_labels:
@@ -47,7 +47,9 @@ class Command(BaseCommand):
 
         # Load the current graph state. Takes a connection, but it's not used
         # (makemigrations doesn't look at the database state).
+        # Also make sure the graph is built without unmigrated apps shoehorned in.
         loader = MigrationLoader(connections[DEFAULT_DB_ALIAS])
+        loader.build_graph(ignore_unmigrated=True)
 
         # Before anything else, see if there's conflicting apps and drop out
         # hard if there are any and they don't want to merge
@@ -72,7 +74,7 @@ class Command(BaseCommand):
         # Detect changes
         autodetector = MigrationAutodetector(
             loader.graph.project_state(),
-            ProjectState.from_app_cache(app_cache),
+            ProjectState.from_apps(apps),
             InteractiveMigrationQuestioner(specified_apps=app_labels),
         )
         changes = autodetector.changes(graph=loader.graph, trim_to_apps=app_labels or None)

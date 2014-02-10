@@ -6,8 +6,7 @@ from importlib import import_module
 import itertools
 import traceback
 
-from django.conf import settings
-from django.core.apps import app_cache
+from django.apps import apps
 from django.core.management import call_command
 from django.core.management.base import BaseCommand, CommandError
 from django.core.management.color import no_style
@@ -47,9 +46,9 @@ class Command(BaseCommand):
 
         # Import the 'management' module within each installed app, to register
         # dispatcher events.
-        for app_name in settings.INSTALLED_APPS:
-            if module_has_submodule(import_module(app_name), "management"):
-                import_module('.management', app_name)
+        for app_config in apps.get_app_configs():
+            if module_has_submodule(app_config.module, "management"):
+                import_module('.management', app_config.name)
 
         # Get the database we're operating from
         db = options.get('database')
@@ -76,7 +75,7 @@ class Command(BaseCommand):
         run_syncdb = False
         target_app_labels_only = True
         if len(args) > 2:
-            raise CommandError("Too many command-line arguments (expecting 'appname' or 'appname migrationname')")
+            raise CommandError("Too many command-line arguments (expecting 'app_label' or 'app_label migrationname')")
         elif len(args) == 2:
             app_label, migration_name = args
             if app_label not in executor.loader.migrated_apps:
@@ -136,7 +135,7 @@ class Command(BaseCommand):
                 # If there's changes that aren't in migrations yet, tell them how to fix it.
                 autodetector = MigrationAutodetector(
                     executor.loader.graph.project_state(),
-                    ProjectState.from_app_cache(app_cache),
+                    ProjectState.from_apps(apps),
                 )
                 changes = autodetector.changes(graph=executor.loader.graph)
                 if changes:
@@ -168,117 +167,123 @@ class Command(BaseCommand):
                 else:
                     self.stdout.write(self.style.MIGRATE_SUCCESS(" OK"))
 
-    def sync_apps(self, connection, apps):
-        "Runs the old syncdb-style operation on a list of apps."
+    def sync_apps(self, connection, app_labels):
+        "Runs the old syncdb-style operation on a list of app_labels."
         cursor = connection.cursor()
 
-        # Get a list of already installed *models* so that references work right.
-        tables = connection.introspection.table_names()
-        seen_models = connection.introspection.installed_models(tables)
-        created_models = set()
-        pending_references = {}
+        try:
+            # Get a list of already installed *models* so that references work right.
+            tables = connection.introspection.table_names(cursor)
+            seen_models = connection.introspection.installed_models(tables)
+            created_models = set()
+            pending_references = {}
 
-        # Build the manifest of apps and models that are to be synchronized
-        all_models = [
-            (app_config.label,
-                router.get_migratable_models(app_config.models_module, connection.alias, include_auto_created=True))
-            for app_config in app_cache.get_app_configs(only_with_models_module=True)
-            if app_config.label in apps
-        ]
+            # Build the manifest of apps and models that are to be synchronized
+            all_models = [
+                (app_config.label,
+                    router.get_migratable_models(app_config, connection.alias, include_auto_created=True))
+                for app_config in apps.get_app_configs()
+                if app_config.models_module is not None and app_config.label in app_labels
+            ]
 
-        def model_installed(model):
-            opts = model._meta
-            converter = connection.introspection.table_name_converter
-            # Note that if a model is unmanaged we short-circuit and never try to install it
-            return not ((converter(opts.db_table) in tables) or
-                (opts.auto_created and converter(opts.auto_created._meta.db_table) in tables))
+            def model_installed(model):
+                opts = model._meta
+                converter = connection.introspection.table_name_converter
+                # Note that if a model is unmanaged we short-circuit and never try to install it
+                return not ((converter(opts.db_table) in tables) or
+                    (opts.auto_created and converter(opts.auto_created._meta.db_table) in tables))
 
-        manifest = OrderedDict(
-            (app_name, list(filter(model_installed, model_list)))
-            for app_name, model_list in all_models
-        )
+            manifest = OrderedDict(
+                (app_name, list(filter(model_installed, model_list)))
+                for app_name, model_list in all_models
+            )
 
-        create_models = set(itertools.chain(*manifest.values()))
-        emit_pre_migrate_signal(create_models, self.verbosity, self.interactive, connection.alias)
+            create_models = set(itertools.chain(*manifest.values()))
+            emit_pre_migrate_signal(create_models, self.verbosity, self.interactive, connection.alias)
 
-        # Create the tables for each model
-        if self.verbosity >= 1:
-            self.stdout.write("  Creating tables...\n")
-        with transaction.atomic(using=connection.alias, savepoint=False):
-            for app_name, model_list in manifest.items():
-                for model in model_list:
-                    # Create the model's database table, if it doesn't already exist.
-                    if self.verbosity >= 3:
-                        self.stdout.write("    Processing %s.%s model\n" % (app_name, model._meta.object_name))
-                    sql, references = connection.creation.sql_create_model(model, no_style(), seen_models)
-                    seen_models.add(model)
-                    created_models.add(model)
-                    for refto, refs in references.items():
-                        pending_references.setdefault(refto, []).extend(refs)
-                        if refto in seen_models:
-                            sql.extend(connection.creation.sql_for_pending_references(refto, no_style(), pending_references))
-                    sql.extend(connection.creation.sql_for_pending_references(model, no_style(), pending_references))
-                    if self.verbosity >= 1 and sql:
-                        self.stdout.write("    Creating table %s\n" % model._meta.db_table)
-                    for statement in sql:
-                        cursor.execute(statement)
-                    tables.append(connection.introspection.table_name_converter(model._meta.db_table))
+            # Create the tables for each model
+            if self.verbosity >= 1:
+                self.stdout.write("  Creating tables...\n")
+            with transaction.atomic(using=connection.alias, savepoint=False):
+                for app_name, model_list in manifest.items():
+                    for model in model_list:
+                        # Create the model's database table, if it doesn't already exist.
+                        if self.verbosity >= 3:
+                            self.stdout.write("    Processing %s.%s model\n" % (app_name, model._meta.object_name))
+                        sql, references = connection.creation.sql_create_model(model, no_style(), seen_models)
+                        seen_models.add(model)
+                        created_models.add(model)
+                        for refto, refs in references.items():
+                            pending_references.setdefault(refto, []).extend(refs)
+                            if refto in seen_models:
+                                sql.extend(connection.creation.sql_for_pending_references(refto, no_style(), pending_references))
+                        sql.extend(connection.creation.sql_for_pending_references(model, no_style(), pending_references))
+                        if self.verbosity >= 1 and sql:
+                            self.stdout.write("    Creating table %s\n" % model._meta.db_table)
+                        for statement in sql:
+                            cursor.execute(statement)
+                        tables.append(connection.introspection.table_name_converter(model._meta.db_table))
 
-        # We force a commit here, as that was the previous behaviour.
-        # If you can prove we don't need this, remove it.
-        transaction.set_dirty(using=connection.alias)
+            # We force a commit here, as that was the previous behaviour.
+            # If you can prove we don't need this, remove it.
+            transaction.set_dirty(using=connection.alias)
+        finally:
+            cursor.close()
 
         # The connection may have been closed by a syncdb handler.
         cursor = connection.cursor()
+        try:
+            # Install custom SQL for the app (but only if this
+            # is a model we've just created)
+            if self.verbosity >= 1:
+                self.stdout.write("  Installing custom SQL...\n")
+            for app_name, model_list in manifest.items():
+                for model in model_list:
+                    if model in created_models:
+                        custom_sql = custom_sql_for_model(model, no_style(), connection)
+                        if custom_sql:
+                            if self.verbosity >= 2:
+                                self.stdout.write("    Installing custom SQL for %s.%s model\n" % (app_name, model._meta.object_name))
+                            try:
+                                with transaction.commit_on_success_unless_managed(using=connection.alias):
+                                    for sql in custom_sql:
+                                        cursor.execute(sql)
+                            except Exception as e:
+                                self.stderr.write("    Failed to install custom SQL for %s.%s model: %s\n" % (app_name, model._meta.object_name, e))
+                                if self.show_traceback:
+                                    traceback.print_exc()
+                        else:
+                            if self.verbosity >= 3:
+                                self.stdout.write("    No custom SQL for %s.%s model\n" % (app_name, model._meta.object_name))
 
-        # Install custom SQL for the app (but only if this
-        # is a model we've just created)
-        if self.verbosity >= 1:
-            self.stdout.write("  Installing custom SQL...\n")
-        for app_name, model_list in manifest.items():
-            for model in model_list:
-                if model in created_models:
-                    custom_sql = custom_sql_for_model(model, no_style(), connection)
-                    if custom_sql:
-                        if self.verbosity >= 2:
-                            self.stdout.write("    Installing custom SQL for %s.%s model\n" % (app_name, model._meta.object_name))
-                        try:
-                            with transaction.commit_on_success_unless_managed(using=connection.alias):
-                                for sql in custom_sql:
-                                    cursor.execute(sql)
-                        except Exception as e:
-                            self.stderr.write("    Failed to install custom SQL for %s.%s model: %s\n" % (app_name, model._meta.object_name, e))
-                            if self.show_traceback:
-                                traceback.print_exc()
-                    else:
-                        if self.verbosity >= 3:
-                            self.stdout.write("    No custom SQL for %s.%s model\n" % (app_name, model._meta.object_name))
+            if self.verbosity >= 1:
+                self.stdout.write("  Installing indexes...\n")
 
-        if self.verbosity >= 1:
-            self.stdout.write("  Installing indexes...\n")
-
-        # Install SQL indices for all newly created models
-        for app_name, model_list in manifest.items():
-            for model in model_list:
-                if model in created_models:
-                    index_sql = connection.creation.sql_indexes_for_model(model, no_style())
-                    if index_sql:
-                        if self.verbosity >= 2:
-                            self.stdout.write("    Installing index for %s.%s model\n" % (app_name, model._meta.object_name))
-                        try:
-                            with transaction.commit_on_success_unless_managed(using=connection.alias):
-                                for sql in index_sql:
-                                    cursor.execute(sql)
-                        except Exception as e:
-                            self.stderr.write("    Failed to install index for %s.%s model: %s\n" % (app_name, model._meta.object_name, e))
+            # Install SQL indices for all newly created models
+            for app_name, model_list in manifest.items():
+                for model in model_list:
+                    if model in created_models:
+                        index_sql = connection.creation.sql_indexes_for_model(model, no_style())
+                        if index_sql:
+                            if self.verbosity >= 2:
+                                self.stdout.write("    Installing index for %s.%s model\n" % (app_name, model._meta.object_name))
+                            try:
+                                with transaction.commit_on_success_unless_managed(using=connection.alias):
+                                    for sql in index_sql:
+                                        cursor.execute(sql)
+                            except Exception as e:
+                                self.stderr.write("    Failed to install index for %s.%s model: %s\n" % (app_name, model._meta.object_name, e))
+        finally:
+            cursor.close()
 
         # Load initial_data fixtures (unless that has been disabled)
         if self.load_initial_data:
-            call_command('loaddata', 'initial_data', verbosity=self.verbosity, database=connection.alias, skip_validation=True)
+            for app_label in app_labels:
+                call_command('loaddata', 'initial_data', verbosity=self.verbosity, database=connection.alias, skip_validation=True, app_label=app_label, hide_empty=True)
 
         return created_models
 
-    def show_migration_list(self, connection, apps=None):
+    def show_migration_list(self, connection, app_names=None):
         """
         Shows a list of all migrations on the system, or only those of
         some named apps.
@@ -287,24 +292,24 @@ class Command(BaseCommand):
         loader = MigrationLoader(connection)
         graph = loader.graph
         # If we were passed a list of apps, validate it
-        if apps:
+        if app_names:
             invalid_apps = []
-            for app in apps:
-                if app not in loader.migrated_apps:
-                    invalid_apps.append(app)
+            for app_name in app_names:
+                if app_name not in loader.migrated_apps:
+                    invalid_apps.append(app_name)
             if invalid_apps:
                 raise CommandError("No migrations present for: %s" % (", ".join(invalid_apps)))
         # Otherwise, show all apps in alphabetic order
         else:
-            apps = sorted(loader.migrated_apps)
+            app_names = sorted(loader.migrated_apps)
         # For each app, print its migrations in order from oldest (roots) to
         # newest (leaves).
-        for app in apps:
-            self.stdout.write(app, self.style.MIGRATE_LABEL)
+        for app_name in app_names:
+            self.stdout.write(app_name, self.style.MIGRATE_LABEL)
             shown = set()
-            for node in graph.leaf_nodes(app):
+            for node in graph.leaf_nodes(app_name):
                 for plan_node in graph.forwards_plan(node):
-                    if plan_node not in shown and plan_node[0] == app:
+                    if plan_node not in shown and plan_node[0] == app_name:
                         # Give it a nice title if it's a squashed one
                         title = plan_node[1]
                         if graph.nodes[plan_node].replaces:

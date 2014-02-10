@@ -5,9 +5,9 @@ import codecs
 import os
 import shutil
 
-from django.core.apps import app_cache
+from django.apps import apps
 from django.core.management import call_command, CommandError
-from django.test.utils import override_settings
+from django.test import override_settings, override_system_checks
 from django.utils import six
 from django.utils._os import upath
 from django.utils.encoding import force_text
@@ -21,6 +21,10 @@ class MigrateTests(MigrationTestBase):
     Tests running the migrate command.
     """
 
+    # `auth` app is imported, but not installed in these tests (thanks to
+    # MigrationTestBase), so we need to exclude checks registered by this app.
+
+    @override_system_checks([])
     @override_settings(MIGRATION_MODULES={"migrations": "migrations.test_migrations"})
     def test_migrate(self):
         """
@@ -49,6 +53,7 @@ class MigrateTests(MigrationTestBase):
         self.assertTableNotExists("migrations_tribble")
         self.assertTableNotExists("migrations_book")
 
+    @override_system_checks([])
     @override_settings(MIGRATION_MODULES={"migrations": "migrations.test_migrations"})
     def test_migrate_list(self):
         """
@@ -71,6 +76,7 @@ class MigrateTests(MigrationTestBase):
         # Cleanup by unmigrating everything
         call_command("migrate", "migrations", "zero", verbosity=0)
 
+    @override_system_checks([])
     @override_settings(MIGRATION_MODULES={"migrations": "migrations.test_migrations_conflict"})
     def test_migrate_conflict_exit(self):
         """
@@ -79,6 +85,7 @@ class MigrateTests(MigrationTestBase):
         with self.assertRaises(CommandError):
             call_command("migrate", "migrations")
 
+    @override_system_checks([])
     @override_settings(MIGRATION_MODULES={"migrations": "migrations.test_migrations_conflict"})
     def test_makemigrations_conflict_exit(self):
         """
@@ -87,6 +94,7 @@ class MigrateTests(MigrationTestBase):
         with self.assertRaises(CommandError):
             call_command("makemigrations")
 
+    @override_system_checks([])
     @override_settings(MIGRATION_MODULES={"migrations": "migrations.test_migrations_conflict"})
     def test_makemigrations_merge_basic(self):
         """
@@ -99,6 +107,7 @@ class MigrateTests(MigrationTestBase):
         except CommandError:
             self.fail("Makemigrations errored in merge mode with conflicts")
 
+    @override_system_checks([])
     @override_settings(MIGRATION_MODULES={"migrations": "migrations.test_migrations"})
     def test_sqlmigrate(self):
         """
@@ -131,11 +140,12 @@ class MakeMigrationsTests(MigrationTestBase):
         self.test_dir = os.path.abspath(os.path.dirname(upath(__file__)))
         self.migration_dir = os.path.join(self.test_dir, 'migrations_%d' % self.creation_counter)
         self.migration_pkg = "migrations.migrations_%d" % self.creation_counter
-        self._old_models = app_cache.app_configs['migrations'].models.copy()
+        self._old_models = apps.app_configs['migrations'].models.copy()
 
     def tearDown(self):
-        app_cache.app_configs['migrations'].models = self._old_models
-        app_cache._get_models_cache = {}
+        apps.app_configs['migrations'].models = self._old_models
+        apps.all_models['migrations'] = self._old_models
+        apps.clear_cache()
 
         os.chdir(self.test_dir)
         try:
@@ -149,9 +159,12 @@ class MakeMigrationsTests(MigrationTestBase):
             return
         shutil.rmtree(dname)
 
+    # `auth` app is imported, but not installed in this test (thanks to
+    # MigrationTestBase), so we need to exclude checks registered by this app.
+    @override_system_checks([])
     def test_files_content(self):
         self.assertTableNotExists("migrations_unicodemodel")
-        app_cache.register_model('migrations', UnicodeModel)
+        apps.register_model('migrations', UnicodeModel)
         with override_settings(MIGRATION_MODULES={"migrations": self.migration_pkg}):
             call_command("makemigrations", "migrations", verbosity=0)
 
@@ -185,9 +198,12 @@ class MakeMigrationsTests(MigrationTestBase):
                 self.assertTrue('\\xda\\xd1\\xcd\\xa2\\xd3\\xd0\\xc9' in content)  # title.verbose_name
                 self.assertTrue('\\u201c\\xd0j\\xe1\\xf1g\\xf3\\u201d' in content)  # title.default
 
+    # `auth` app is imported, but not installed in this test (thanks to
+    # MigrationTestBase), so we need to exclude checks registered by this app.
+    @override_system_checks([])
     def test_failing_migration(self):
         #21280 - If a migration fails to serialize, it shouldn't generate an empty file.
-        app_cache.register_model('migrations', UnserializableModel)
+        apps.register_model('migrations', UnserializableModel)
 
         with six.assertRaisesRegex(self, ValueError, r'Cannot serialize'):
             with override_settings(MIGRATION_MODULES={"migrations": self.migration_pkg}):

@@ -8,14 +8,17 @@ from django import forms
 from django.conf import settings
 from django.contrib import messages
 from django.contrib.admin import widgets, helpers
-from django.contrib.admin.utils import (unquote, flatten_fieldsets, get_deleted_objects,
-    model_format_dict, NestedObjects, lookup_needs_distinct)
 from django.contrib.admin import validation
+from django.contrib.admin.checks import (BaseModelAdminChecks, ModelAdminChecks,
+    InlineModelAdminChecks)
+from django.contrib.admin.utils import (unquote, flatten_fieldsets,
+    get_deleted_objects, model_format_dict, NestedObjects,
+    lookup_needs_distinct)
 from django.contrib.admin.templatetags.admin_static import static
 from django.contrib.admin.templatetags.admin_urls import add_preserved_filters
 from django.contrib.auth import get_permission_codename
-from django.contrib.contenttypes.models import ContentType
-from django.core.exceptions import PermissionDenied, ValidationError, FieldError
+from django.core import checks
+from django.core.exceptions import PermissionDenied, ValidationError, FieldError, ImproperlyConfigured
 from django.core.paginator import Paginator
 from django.core.urlresolvers import reverse
 from django.db import models, transaction, router
@@ -30,25 +33,36 @@ from django.http import Http404, HttpResponseRedirect
 from django.http.response import HttpResponseBase
 from django.shortcuts import get_object_or_404
 from django.template.response import SimpleTemplateResponse, TemplateResponse
-from django.utils.decorators import method_decorator
-from django.utils.html import escape, escapejs
-from django.utils.safestring import mark_safe
 from django.utils import six
+from django.utils.decorators import method_decorator
 from django.utils.deprecation import RenameMethodsBase
+from django.utils.encoding import force_text
+from django.utils.encoding import python_2_unicode_compatible
+from django.utils.html import escape, escapejs
 from django.utils.http import urlencode
 from django.utils.text import capfirst, get_text_list
 from django.utils.translation import ugettext as _
 from django.utils.translation import ungettext
-from django.utils.encoding import force_text
+from django.utils.safestring import mark_safe
 from django.views.decorators.csrf import csrf_protect
 
 
 IS_POPUP_VAR = '_popup'
 TO_FIELD_VAR = '_to_field'
 
+
 HORIZONTAL, VERTICAL = 1, 2
-# returns the <ul> class for a given radio_admin field
-get_ul_class = lambda x: 'radiolist%s' % (' inline' if x == HORIZONTAL else '')
+
+
+def get_content_type_for_model(obj):
+    # Since this module gets imported in the application's root package,
+    # it cannot import models from other applications at the module level.
+    from django.contrib.contenttypes.models import ContentType
+    return ContentType.objects.get_for_model(obj)
+
+
+def get_ul_class(radio_style):
+    return 'radiolist' if radio_style == VERTICAL else 'radiolist inline'
 
 
 class IncorrectLookupParameters(Exception):
@@ -100,13 +114,41 @@ class BaseModelAdmin(six.with_metaclass(RenameBaseModelAdminMethods)):
     ordering = None
     view_on_site = True
 
-    # validation
-    validator_class = validation.BaseValidator
+    # Validation of ModelAdmin definitions
+    # Old, deprecated style:
+    validator_class = None
+    default_validator_class = validation.BaseValidator
+    # New style:
+    checks_class = BaseModelAdminChecks
 
     @classmethod
     def validate(cls, model):
-        validator = cls.validator_class()
+        warnings.warn(
+            'ModelAdmin.validate() is deprecated. Use "check()" instead.',
+            PendingDeprecationWarning)
+        if cls.validator_class:
+            validator = cls.validator_class()
+        else:
+            validator = cls.default_validator_class()
         validator.validate(cls, model)
+
+    @classmethod
+    def check(cls, model, **kwargs):
+        if cls.validator_class:
+            warnings.warn(
+                'ModelAdmin.validator_class is deprecated. '
+                'ModeAdmin validators must be converted to use '
+                'the system check framework.',
+                PendingDeprecationWarning)
+            validator = cls.validator_class()
+            try:
+                validator.validate(cls, model)
+            except ImproperlyConfigured as e:
+                return [checks.Error(e.args[0], hint=None, obj=cls)]
+            else:
+                return []
+        else:
+            return cls.checks_class().check(cls, model, **kwargs)
 
     def __init__(self):
         self._orig_formfield_overrides = self.formfield_overrides
@@ -255,7 +297,7 @@ class BaseModelAdmin(six.with_metaclass(RenameBaseModelAdminMethods)):
         elif self.view_on_site and hasattr(obj, 'get_absolute_url'):
             # use the ContentType lookup if view_on_site is True
             return reverse('admin:view_on_site', kwargs={
-                'content_type_id': ContentType.objects.get_for_model(obj).pk,
+                'content_type_id': get_content_type_for_model(obj).pk,
                 'object_id': obj.pk
             })
 
@@ -432,6 +474,7 @@ class BaseModelAdmin(six.with_metaclass(RenameBaseModelAdminMethods)):
         return request.user.has_perm("%s.%s" % (opts.app_label, codename))
 
 
+@python_2_unicode_compatible
 class ModelAdmin(BaseModelAdmin):
     "Encapsulates all admin options and functionality for a given model."
 
@@ -466,13 +509,19 @@ class ModelAdmin(BaseModelAdmin):
     actions_selection_counter = True
 
     # validation
-    validator_class = validation.ModelAdminValidator
+    # Old, deprecated style:
+    default_validator_class = validation.ModelAdminValidator
+    # New style:
+    checks_class = ModelAdminChecks
 
     def __init__(self, model, admin_site):
         self.model = model
         self.opts = model._meta
         self.admin_site = admin_site
         super(ModelAdmin, self).__init__()
+
+    def __str__(self):
+        return "%s.%s" % (self.model._meta.app_label, self.__class__.__name__)
 
     def get_inline_instances(self, request, obj=None):
         inline_instances = []
@@ -685,7 +734,7 @@ class ModelAdmin(BaseModelAdmin):
         from django.contrib.admin.models import LogEntry, ADDITION
         LogEntry.objects.log_action(
             user_id=request.user.pk,
-            content_type_id=ContentType.objects.get_for_model(object).pk,
+            content_type_id=get_content_type_for_model(object).pk,
             object_id=object.pk,
             object_repr=force_text(object),
             action_flag=ADDITION
@@ -700,7 +749,7 @@ class ModelAdmin(BaseModelAdmin):
         from django.contrib.admin.models import LogEntry, CHANGE
         LogEntry.objects.log_action(
             user_id=request.user.pk,
-            content_type_id=ContentType.objects.get_for_model(object).pk,
+            content_type_id=get_content_type_for_model(object).pk,
             object_id=object.pk,
             object_repr=force_text(object),
             action_flag=CHANGE,
@@ -709,15 +758,15 @@ class ModelAdmin(BaseModelAdmin):
 
     def log_deletion(self, request, object, object_repr):
         """
-        Log that an object will be deleted. Note that this method is called
-        before the deletion.
+        Log that an object will be deleted. Note that this method must be
+        called before the deletion.
 
         The default implementation creates an admin LogEntry object.
         """
         from django.contrib.admin.models import LogEntry, DELETION
         LogEntry.objects.log_action(
             user_id=request.user.pk,
-            content_type_id=ContentType.objects.get_for_model(self.model).pk,
+            content_type_id=get_content_type_for_model(object).pk,
             object_id=object.pk,
             object_repr=object_repr,
             action_flag=DELETION
@@ -999,7 +1048,7 @@ class ModelAdmin(BaseModelAdmin):
             'absolute_url': view_on_site_url,
             'form_url': form_url,
             'opts': opts,
-            'content_type_id': ContentType.objects.get_for_model(self.model).id,
+            'content_type_id': get_content_type_for_model(self.model).pk,
             'save_as': self.save_as,
             'save_on_top': self.save_on_top,
             'to_field_var': TO_FIELD_VAR,
@@ -1308,7 +1357,6 @@ class ModelAdmin(BaseModelAdmin):
             media=media,
             inline_admin_formsets=inline_admin_formsets,
             errors=helpers.AdminErrorList(form, formsets),
-            app_label=opts.app_label,
             preserved_filters=self.get_preserved_filters(request),
         )
         context.update(extra_context or {})
@@ -1532,7 +1580,6 @@ class ModelAdmin(BaseModelAdmin):
             media=media,
             has_add_permission=self.has_add_permission(request),
             opts=cl.opts,
-            app_label=app_label,
             action_form=action_form,
             actions_on_top=self.actions_on_top,
             actions_on_bottom=self.actions_on_bottom,
@@ -1619,7 +1666,7 @@ class ModelAdmin(BaseModelAdmin):
         app_label = opts.app_label
         action_list = LogEntry.objects.filter(
             object_id=unquote(object_id),
-            content_type__id__exact=ContentType.objects.get_for_model(model).id
+            content_type=get_content_type_for_model(model)
         ).select_related().order_by('action_time')
 
         context = dict(self.admin_site.each_context(),
@@ -1627,7 +1674,6 @@ class ModelAdmin(BaseModelAdmin):
             action_list=action_list,
             module_name=capfirst(force_text(opts.verbose_name_plural)),
             object=obj,
-            app_label=app_label,
             opts=opts,
             preserved_filters=self.get_preserved_filters(request),
         )
@@ -1685,8 +1731,7 @@ class InlineModelAdmin(BaseModelAdmin):
     verbose_name_plural = None
     can_delete = True
 
-    # validation
-    validator_class = validation.InlineValidator
+    checks_class = InlineModelAdminChecks
 
     def __init__(self, parent_model, admin_site):
         self.admin_site = admin_site

@@ -7,9 +7,8 @@ from django.core.servers.basehttp import get_internal_wsgi_application
 from django.core.signals import request_started
 from django.core.wsgi import get_wsgi_application
 from django.db import close_old_connections
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.test.client import RequestFactory
-from django.test.utils import override_settings
 from django.utils import six
 
 
@@ -102,6 +101,6 @@ class GetInternalWSGIApplicationTest(unittest.TestCase):
     def test_bad_name(self):
         with six.assertRaisesRegex(self,
                 ImproperlyConfigured,
-                r"^WSGI application 'wsgi.wsgi.noexist' could not be loaded; Module.*"):
+                r"^WSGI application 'wsgi.wsgi.noexist' could not be loaded; Error importing.*"):
 
             get_internal_wsgi_application()

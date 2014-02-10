@@ -7,7 +7,7 @@ import warnings
 from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
 from django.utils.functional import cached_property
-from django.utils.module_loading import import_by_path
+from django.utils.module_loading import import_string
 from django.utils._os import upath
 from django.utils import six
 
@@ -221,7 +221,7 @@ class ConnectionRouter(object):
         routers = []
         for r in self._routers:
             if isinstance(r, six.string_types):
-                router = import_by_path(r)()
+                router = import_string(r)()
             else:
                 router = r
             routers.append(router)
@@ -269,6 +269,10 @@ class ConnectionRouter(object):
                     method = router.allow_migrate
                 except AttributeError:
                     method = router.allow_syncdb
+                    warnings.warn(
+                        'Router.allow_syncdb has been deprecated and will stop working in Django 1.9. '
+                        'Rename the method to allow_migrate.',
+                        PendingDeprecationWarning, stacklevel=2)
             except AttributeError:
                 # If the router doesn't have a method, skip to the next one.
                 pass
@@ -278,10 +282,9 @@ class ConnectionRouter(object):
                     return allow
         return True
 
-    def get_migratable_models(self, app, db, include_auto_created=False):
+    def get_migratable_models(self, app_config, db, include_auto_created=False):
         """
         Return app models allowed to be synchronized on provided db.
         """
-        from django.core.apps import app_cache
-        return [model for model in app_cache.get_models(app, include_auto_created=include_auto_created)
-                if self.allow_migrate(db, model)]
+        models = app_config.get_models(include_auto_created=include_auto_created)
+        return [model for model in models if self.allow_migrate(db, model)]

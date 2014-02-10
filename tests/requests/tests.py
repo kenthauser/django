@@ -13,9 +13,9 @@ from django.core.exceptions import SuspiciousOperation
 from django.core.handlers.wsgi import WSGIRequest, LimitedStream
 from django.http import (HttpRequest, HttpResponse, parse_cookie,
     build_request_repr, UnreadablePostError, RawPostDataException)
-from django.test import SimpleTestCase, TransactionTestCase
+from django.test import SimpleTestCase, TransactionTestCase, override_settings
 from django.test.client import FakePayload
-from django.test.utils import override_settings, str_prefix
+from django.test.utils import str_prefix
 from django.utils import six
 from django.utils.http import cookie_date, urlencode
 from django.utils.six.moves.urllib.parse import urlencode as original_urlencode
@@ -725,7 +725,7 @@ class DatabaseConnectionHandlingTests(TransactionTestCase):
         # request_finished signal.
         response = self.client.get('/')
         # Make sure there is an open connection
-        connection.cursor()
+        connection.ensure_connection()
         connection.enter_transaction_management()
         signals.request_finished.send(sender=response._handler_class)
         self.assertEqual(len(connection.transaction_state), 0)

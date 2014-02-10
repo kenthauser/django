@@ -10,6 +10,7 @@ from contextlib import contextmanager
 from importlib import import_module
 
 from django.conf import settings
+from django.core import checks
 from django.db import DEFAULT_DB_ALIAS
 from django.db.backends.signals import connection_created
 from django.db.backends import utils
@@ -110,9 +111,8 @@ class BaseDatabaseWrapper(object):
         # Establish the connection
         conn_params = self.get_connection_params()
         self.connection = self.get_new_connection(conn_params)
+        self.set_autocommit(self.settings_dict['AUTOCOMMIT'])
         self.init_connection_state()
-        if self.settings_dict['AUTOCOMMIT']:
-            self.set_autocommit(True)
         connection_created.send(sender=self.__class__, connection=self)
 
     def ensure_connection(self):
@@ -194,13 +194,16 @@ class BaseDatabaseWrapper(object):
     ##### Backend-specific savepoint management methods #####
 
     def _savepoint(self, sid):
-        self.cursor().execute(self.ops.savepoint_create_sql(sid))
+        with self.cursor() as cursor:
+            cursor.execute(self.ops.savepoint_create_sql(sid))
 
     def _savepoint_rollback(self, sid):
-        self.cursor().execute(self.ops.savepoint_rollback_sql(sid))
+        with self.cursor() as cursor:
+            cursor.execute(self.ops.savepoint_rollback_sql(sid))
 
     def _savepoint_commit(self, sid):
-        self.cursor().execute(self.ops.savepoint_commit_sql(sid))
+        with self.cursor() as cursor:
+            cursor.execute(self.ops.savepoint_commit_sql(sid))
 
     def _savepoint_allowed(self):
         # Savepoints cannot be created outside a transaction
@@ -610,8 +613,8 @@ class BaseDatabaseFeatures(object):
     # Is there a 1000 item limit on query parameters?
     supports_1000_query_parameters = True
 
-    # Can an object have a primary key of 0? MySQL says No.
-    allows_primary_key_0 = True
+    # Can an object have an autoincrement primary key of 0? MySQL says No.
+    allows_auto_pk_0 = True
 
     # Do we need to NULL a ForeignKey out, or can the constraint check be
     # deferred
@@ -651,9 +654,6 @@ class BaseDatabaseFeatures(object):
     # Can we issue more than one ALTER COLUMN clause in an ALTER TABLE?
     supports_combined_alters = False
 
-    # What's the maximum length for index names?
-    max_index_name_length = 63
-
     # Does it support foreign keys?
     supports_foreign_keys = True
 
@@ -674,6 +674,9 @@ class BaseDatabaseFeatures(object):
     # What kind of error does the backend throw when accessing closed cursor?
     closed_cursor_error_class = ProgrammingError
 
+    # Does 'a' LIKE 'A' match?
+    has_case_insensitive_like = True
+
     def __init__(self, connection):
         self.connection = connection
 
@@ -685,15 +688,15 @@ class BaseDatabaseFeatures(object):
             # otherwise autocommit will cause the confimation to
             # fail.
             self.connection.enter_transaction_management()
-            cursor = self.connection.cursor()
-            cursor.execute('CREATE TABLE ROLLBACK_TEST (X INT)')
-            self.connection.commit()
-            cursor.execute('INSERT INTO ROLLBACK_TEST (X) VALUES (8)')
-            self.connection.rollback()
-            cursor.execute('SELECT COUNT(X) FROM ROLLBACK_TEST')
-            count, = cursor.fetchone()
-            cursor.execute('DROP TABLE ROLLBACK_TEST')
-            self.connection.commit()
+            with self.connection.cursor() as cursor:
+                cursor.execute('CREATE TABLE ROLLBACK_TEST (X INT)')
+                self.connection.commit()
+                cursor.execute('INSERT INTO ROLLBACK_TEST (X) VALUES (8)')
+                self.connection.rollback()
+                cursor.execute('SELECT COUNT(X) FROM ROLLBACK_TEST')
+                count, = cursor.fetchone()
+                cursor.execute('DROP TABLE ROLLBACK_TEST')
+                self.connection.commit()
         finally:
             self.connection.leave_transaction_management()
         return count == 0
@@ -972,15 +975,6 @@ class BaseDatabaseOperations(object):
         """
         raise NotImplementedError('subclasses of BaseDatabaseOperations may require a quote_name() method')
 
-    def quote_parameter(self, value):
-        """
-        Returns a quoted version of the value so it's safe to use in an SQL
-        string. This should NOT be used to prepare SQL statements to send to
-        the database; it is meant for outputting SQL statements to a file
-        or the console for later execution by a developer/DBA.
-        """
-        raise NotImplementedError()
-
     def random_function_sql(self):
         """
         Returns an SQL expression that returns a random value.
@@ -1250,7 +1244,8 @@ class BaseDatabaseIntrospection(object):
         in sorting order between databases.
         """
         if cursor is None:
-            cursor = self.connection.cursor()
+            with self.connection.cursor() as cursor:
+                return sorted(self.get_table_list(cursor))
         return sorted(self.get_table_list(cursor))
 
     def get_table_list(self, cursor):
@@ -1268,11 +1263,11 @@ class BaseDatabaseIntrospection(object):
         If only_existing is True, the resulting list will only include the tables
         that actually exist in the database.
         """
-        from django.core.apps import app_cache
+        from django.apps import apps
         from django.db import router
         tables = set()
-        for app_config in app_cache.get_app_configs(only_with_models_module=True):
-            for model in router.get_migratable_models(app_config.models_module, self.connection.alias):
+        for app_config in apps.get_app_configs():
+            for model in router.get_migratable_models(app_config, self.connection.alias):
                 if not model._meta.managed:
                     continue
                 tables.add(model._meta.db_table)
@@ -1289,11 +1284,11 @@ class BaseDatabaseIntrospection(object):
 
     def installed_models(self, tables):
         "Returns a set of all models represented by the provided list of table names."
-        from django.core.apps import app_cache
+        from django.apps import apps
         from django.db import router
         all_models = []
-        for app_config in app_cache.get_app_configs(only_with_models_module=True):
-            all_models.extend(router.get_migratable_models(app_config.models_module, self.connection.alias))
+        for app_config in apps.get_app_configs():
+            all_models.extend(router.get_migratable_models(app_config, self.connection.alias))
         tables = list(map(self.table_name_converter, tables))
         return set([
             m for m in all_models
@@ -1302,13 +1297,13 @@ class BaseDatabaseIntrospection(object):
 
     def sequence_list(self):
         "Returns a list of information about all DB sequences for all models in all apps."
-        from django.core.apps import app_cache
+        from django.apps import apps
         from django.db import models, router
 
         sequence_list = []
 
-        for app_config in app_cache.get_app_configs(only_with_models_module=True):
-            for model in router.get_migratable_models(app_config.models_module, self.connection.alias):
+        for app_config in apps.get_app_configs():
+            for model in router.get_migratable_models(app_config, self.connection.alias):
                 if not model._meta.managed:
                     continue
                 if model._meta.swapped:
@@ -1398,5 +1393,30 @@ class BaseDatabaseValidation(object):
         self.connection = connection
 
     def validate_field(self, errors, opts, f):
-        "By default, there is no backend-specific validation"
+        """
+        By default, there is no backend-specific validation.
+
+        This method has been deprecated by the new checks framework. New
+        backends should implement check_field instead.
+        """
+        # This is deliberately commented out. It exists as a marker to
+        # remind us to remove this method, and the check_field() shim,
+        # when the time comes.
+        # warnings.warn('"validate_field" has been deprecated", PendingDeprecationWarning)
         pass
+
+    def check_field(self, field, **kwargs):
+        class ErrorList(list):
+            """A dummy list class that emulates API used by the older
+            validate_field() method. When validate_field() is fully
+            deprecated, this dummy can be removed too.
+            """
+            def add(self, opts, error_message):
+                self.append(checks.Error(error_message, hint=None, obj=field))
+
+        errors = ErrorList()
+        # Some tests create fields in isolation -- the fields are not attached
+        # to any model, so they have no `model` attribute.
+        opts = field.model._meta if hasattr(field, 'model') else None
+        self.validate_field(errors, field, opts)
+        return list(errors)
